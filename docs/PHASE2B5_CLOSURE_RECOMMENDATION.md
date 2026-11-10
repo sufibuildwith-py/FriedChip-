@@ -1,16 +1,16 @@
-# Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 — Closure Recommendation & Milestone Report
+# Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 / 2B.5.4 — Closure Recommendation & Milestone Report
 
-**Project:** FriedChip+  
-**Release:** Phase 2B.5 / Phase 2B.5.2 / Phase 2B.5.3  
-**Recommendation:** **FULL PHASE 2B CLOSURE APPROVED**  
+**Project:** FriedChip+ Clean-Room Firmware Engineering Workstation
+**Release:** Phase 2B Final Closure (incorporating Phase 2B.5.4)
+**Recommendation:** **FULL PHASE 2B CLOSURE APPROVED & IFD PERMANENTLY FROZEN**
 **Phase 3 Status:** **STRICTLY LOCKED**
 
 ---
 
 ## 1. Executive Summary
 
-Phase 2B.5, Phase 2B.5.1, Phase 2B.5.2, and Phase 2B.5.3 were chartered to achieve:
-- **Track A (IFD Safety Closure & Defect Remediation):** Resolve all findings from independent engineering reviews (DEF-52 through DEF-67) without expanding product scope.
+Phase 2B.5, Phase 2B.5.1, Phase 2B.5.2, Phase 2B.5.3, and Phase 2B.5.4 were chartered to achieve:
+- **Track A (IFD Safety Closure & Defect Remediation):** Resolve all findings from independent engineering reviews (DEF-52 through DEF-70) without expanding product scope.
 - **Track B (Third-Party Research Integration):** Convert the existing 25 cloned repositories under `research/third_party/` into an evidence-backed inventory, architectural audit, capability matrix, adapter integration contract, and next-capability roadmap.
 
 Both Track A and Track B have been executed with complete rigor. All 73 automated in-tree unit, regression, fuzzing, and observer tests pass cleanly (with 2 optional real-world fixture tests ignored in default runs, passing when executed for a total 75-test verified suite).
@@ -33,12 +33,15 @@ Both Track A and Track B have been executed with complete rigor. All 73 automate
 | **DEF-65** | Context-Free IFD Profile Detector API Contract | **RESOLVED** | Provided `detect_ifd_profile_with_context` for complete descriptor context inspection. Deprecated context-free `detect_ifd_profile` with explicit contract notice. Validated across 6 dedicated regression tests. |
 | **DEF-66** | Completion Report Metadata Reconciliation | **RESOLVED** | Clarified previous chat summary transcription discrepancies for commit SHA and Dell fixture SHA-256. Verified canonical disk binary hash `E24B8F8F...` and length `13,662,488` bytes. |
 | **DEF-67** | Defect Register Status Consistency | **RESOLVED** | Reconciled top-level metadata and complete defect summary table in `PHASE2B_DEFECT_REGISTER.md` across all 26 defects (DEF-15..24, DEF-52..67). |
+| **DEF-68** | Correct Rust Compatibility Terminology | **RESOLVED** | Replaced "backwards binary compatibility" with "backwards source and API compatibility as a deprecated public API; no stable Rust binary ABI guarantee is claimed or implied." |
+| **DEF-69** | Accurate API Call-Site Audit for `detect_ifd_profile` | **RESOLVED** | Reconciled repository-wide call site counts: 0 production call sites, 2 test call sites, 1 module import. Confirmed production parser directly uses context-aware resolver. |
+| **DEF-70** | Qualified Historical Verification Status Hierarchy | **RESOLVED** | Formalized the verification hierarchy at the top of the defect register into five explicit tiers: Documented Resolution, Synthetic Regression-Tested, Real-World Fixture-Tested, Independently Verified Hardware, and Explicitly Unverified / Unsupported Conditions. |
 
 ---
 
 ## 3. Deliverables Verification
 
-All required Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 documentation artifacts have been produced, audited, and committed:
+All required Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 / 2B.5.4 documentation artifacts have been produced, audited, and committed:
 1. `docs/PHASE2B5_REPOSITORY_INVENTORY.md` — Verified live Git metadata, SHAs, remotes, tracked file counts, license presence, and identity reconciliation for all 25 repositories.
 2. `docs/PHASE2B5_REPOSITORY_AUDIT.md` — Complete architectural and legal audit classifying each repository into formal product tiers with accurate feasibility constraints.
 3. `docs/PHASE2B5_CAPABILITY_MATRIX.md` — Mapping of 17 core firmware capabilities to upstream sources and FriedChip+ product modules.
@@ -48,7 +51,7 @@ All required Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 documentation artifacts have 
 7. `docs/PHASE2B5_CLOSURE_RECOMMENDATION.md` — Official closure sign-off and milestone boundary declaration.
 8. `docs/PHASE2B5_1_CORRECTION_REPORT.md` — Remediation report for review findings DEF-57 through DEF-61.
 9. `docs/PHASE2B5_2_IMPLEMENTATION_REPORT.md` — Remediation report for review findings DEF-62 through DEF-64.
-10. `docs/PHASE2B5_3_FINAL_AUDIT_REPORT.md` — Final audit deliverable for review findings DEF-65 through DEF-67.
+10. `docs/PHASE2B5_3_FINAL_AUDIT_REPORT.md` — Final audit deliverable for review findings DEF-65 through DEF-67, reconciled in DEF-68/69.
 
 ---
 
@@ -60,6 +63,6 @@ All required Phase 2B.5 / 2B.5.1 / 2B.5.2 / 2B.5.3 documentation artifacts have 
   - PFAT decapsulation remains deferred pending authentic encrypted fixture acquisition.
   - Subprocess adapter runners and live sandboxes remain in the design phase; none were introduced into active application code.
 - **Cargo Architecture Preserved:** All changes were made surgically within `src-tauri/src/engine/` and `src-tauri/src/tests/` without restructuring the workspace or modifying dependencies.
-- **IFD Parser Feature Freeze:** Intel Flash Descriptor parsing logic is complete, verified, and frozen. No further IFD feature expansion is authorized.
+- **IFD Parser Feature Freeze:** Intel Flash Descriptor parsing logic is complete, verified, and **PERMANENTLY FROZEN**. No further IFD feature expansion is authorized.
 
-**Phase 2B (including all sub-milestones 2B.1 through 2B.5.3) is officially declared CLOSED and ready for formal sign-off.**
+**Phase 2B (including all sub-milestones 2B.1 through 2B.5.4) is officially declared CLOSED and ready for formal sign-off.**

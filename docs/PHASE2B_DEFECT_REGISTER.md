@@ -1,11 +1,22 @@
 # FriedChip+ — Phase 2B Defect Register & Resolution Ledger
 
-**Document ID:** `REG-DEF-008`  
-**Product:** FriedChip+ Clean-Room Firmware Engineering Workstation  
-**Author / Engineering Lead:** Sufiyan Khan  
-**Status:** ALL DEFECTS RESOLVED & VERIFIED (DEF-15 through DEF-24, DEF-52 through DEF-67)  
-**Audit Milestone:** Phase 2B.5.3 Final IFD Audit & Engineering Closure  
+**Document ID:** `REG-DEF-009`
+**Product:** FriedChip+ Clean-Room Firmware Engineering Workstation
+**Author / Engineering Lead:** Sufiyan Khan
+**Status:** ALL DEFECTS RESOLVED WITHIN ENGINEERING SPECIFICATION (DEF-15..24, DEF-52..70)
+**Audit Milestone:** Phase 2B.5.4 Final Documentation Accuracy Pass & IFD Freeze Confirmation
 **Phase 3 Status:** **STRICTLY LOCKED** (No physical hardware flashing, no live kernel drivers, no PFAT decapsulation)
+**IFD Parser Status:** **FROZEN** (Permanent logic and feature freeze)
+
+---
+
+### Verification Qualification & Scope Boundaries (DEF-70)
+To maintain rigorous firmware engineering standards, defect resolution statuses in this register are qualified as follows:
+- **Documented Resolution:** Root causes, upstream source references, and algorithmic corrections are formally analyzed and recorded.
+- **Synthetic Regression-Tested Behavior:** Logic, bitfield masking, bounds checking, and failure branches are verified using automated deterministic in-tree unit test suites.
+- **Real-World Fixture-Tested Behavior:** Real-world parsing is validated against available authentic disk fixtures (e.g., Dell Latitude 5X90 1.41.0 executable fixture `13,662,488` bytes, SHA-256 `E24B8F8F...`).
+- **Independently Verified Hardware Behavior:** Physical flash programmer compatibility and live SPI bus operations are strictly marked `Indeterminate` / `NOT_TESTED` in software; no live hardware flasher or physical SPI bus testing is claimed without physical hardware connected.
+- **Explicitly Unverified / Unsupported Conditions:** Alternate unacquired fixtures (e.g., ~35 MB Dell Update Package), V1.5 intermediate descriptors, and platforms lacking authentic strap evidence are categorized as `UNVERIFIED_EXTERNALLY_REFERENCED` or `Unknown` and quarantined from speculative decoding.
 
 ---
 
@@ -39,6 +50,9 @@
 | **DEF-65** | Phase 2B.5.3 | Major | IFD API Contract | Context-Free IFD Profile Detector API Contract & Deprecation | **RESOLVED** |
 | **DEF-66** | Phase 2B.5.3 | Normal | Documentation | Completion Report Metadata Reconciliation (SHA & Fixture Classification) | **RESOLVED** |
 | **DEF-67** | Phase 2B.5.3 | Normal | Defect Ledger | Defect Register Status Consistency & Historical Hierarchy | **RESOLVED** |
+| **DEF-68** | Phase 2B.5.4 | Normal | Documentation | Correct Rust Compatibility Terminology (Source/API vs Binary ABI) | **RESOLVED** |
+| **DEF-69** | Phase 2B.5.4 | Normal | Documentation | Accurate API Call-Site Audit for `detect_ifd_profile` | **RESOLVED** |
+| **DEF-70** | Phase 2B.5.4 | Normal | Defect Ledger | Qualified Historical Verification Status Hierarchy | **RESOLVED** |
 
 ---
 
@@ -329,7 +343,40 @@
 
 ---
 
-## 6. Comprehensive Reconciled Test Suite Ledger
+## 6. Phase 2B.5.4 Documentation Accuracy & IFD Freeze Ledger (DEF-68, DEF-69, DEF-70)
+
+### DEF-68: Correct Rust Compatibility Terminology
+1. **Original Problem:** Documentation in `PHASE2B5_3_FINAL_AUDIT_REPORT.md` claimed "backwards binary compatibility" for the deprecated `detect_ifd_profile` function.
+2. **Root Cause:** Imprecise wording conflating source-level API preservation with binary ABI guarantees. Rust does not provide a stable binary ABI across compiler releases.
+3. **Remediation:** Replaced "backwards binary compatibility" with "backwards source and API compatibility as a deprecated public API; no stable Rust binary ABI guarantee is claimed or implied."
+4. **Files Changed:** `docs/PHASE2B5_3_FINAL_AUDIT_REPORT.md`.
+5. **Closure Assessment:** **CLOSED**.
+
+---
+
+### DEF-69: Accurate API Call-Site Audit for `detect_ifd_profile`
+1. **Original Problem:** The Phase 2B.5.3 audit report stated `detect_ifd_profile` had 0 test call sites, overlooking the two regression tests added specifically to verify its deprecation contract.
+2. **Root Cause:** Stale call-site counts recorded prior to implementing the DEF-65 regression tests.
+3. **Remediation:** Reconciled repository-wide call site counts:
+   - Production call sites: **0**.
+   - Test call sites: **2** direct calls (`engine_tests.rs:2300`, `engine_tests.rs:2330`) plus 1 import (`engine_tests.rs:10`).
+   - Delegation: The deprecated helper internally delegates to `detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None, None).profile`.
+   - Production parser: `IntelFlashDescriptor::parse` invokes `detect_ifd_profile_resolution` with full context from `FLUMAP1` at `0x0EFC` and never invokes `detect_ifd_profile`.
+4. **Files Changed:** `docs/PHASE2B5_3_FINAL_AUDIT_REPORT.md`.
+5. **Closure Assessment:** **CLOSED**.
+
+---
+
+### DEF-70: Qualified Historical Verification Status Hierarchy
+1. **Original Problem:** Monolithic top-level claims ("ALL DEFECTS RESOLVED & VERIFIED") could imply universal real-world hardware or OEM coverage across all possible platforms.
+2. **Root Cause:** Lack of a tiered qualification framework separating synthetic regression tests, real-world disk fixture checks, hardware pin verification, and unsupported platform profiles.
+3. **Remediation:** Formalized the verification hierarchy at the top of the defect register into five explicit tiers: Documented Resolution, Synthetic Regression-Tested, Real-World Fixture-Tested, Independently Verified Hardware, and Explicitly Unverified / Unsupported Conditions.
+4. **Files Changed:** `docs/PHASE2B_DEFECT_REGISTER.md`.
+5. **Closure Assessment:** **CLOSED**.
+
+---
+
+## 7. Comprehensive Reconciled Test Suite Ledger
 
 | Test Suite / Category | Count | Status | Notes |
 |---|---|---|---|
@@ -341,8 +388,8 @@
 
 ---
 
-## 7. Phase 2B Final Engineering Sign-Off
+## 8. Phase 2B Final Engineering Sign-Off & Permanent IFD Freeze
 
-All 26 identified defects across Phase 2B, Phase 2B.1, Phase 2B.2, Phase 2B.3, Phase 2B.4, Phase 2B.5, Phase 2B.5.1, Phase 2B.5.2, and Phase 2B.5.3 are verified **RESOLVED**.
+All 29 identified defects across Phase 2B, Phase 2B.1, Phase 2B.2, Phase 2B.3, Phase 2B.4, Phase 2B.5, Phase 2B.5.1, Phase 2B.5.2, Phase 2B.5.3, and Phase 2B.5.4 are verified **RESOLVED** within the defined engineering specification boundaries.
 
-Intel Flash Descriptor parsing, boundary calculation, geometry validation, platform profile classification, and error propagation are frozen. No further IFD feature expansion is authorized. Phase 3 remains strictly locked.
+Intel Flash Descriptor parsing, boundary calculation, geometry validation, platform profile classification, and error propagation are **PERMANENTLY FROZEN**. No additional IFD milestones will be opened for cosmetic refactoring, heuristic experimentation, or feature expansion. Phase 3 remains strictly locked.

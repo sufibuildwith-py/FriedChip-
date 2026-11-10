@@ -1,10 +1,10 @@
 # Phase 2B.5.3 — Final IFD API Contract Audit, Commit/Fixture Evidence Reconciliation & Phase 2B Closure Report
 
-**Project:** FriedChip+ Clean-Room Firmware Engineering Workstation  
-**Release:** Phase 2B.5.3 (Final IFD Audit & Engineering Closure)  
-**Baseline Starting Commit:** `189680d55339c40ddc98bd294cf42db76b4f44aa`  
-**Execution Timestamp:** 2026-11-11  
-**Phase 3 Status:** **STRICTLY LOCKED** (No hardware SPI flashing, no live kernel drivers, no PFAT decapsulation)  
+**Project:** FriedChip+ Clean-Room Firmware Engineering Workstation
+**Release:** Phase 2B.5.3 (Final IFD Audit & Engineering Closure)
+**Baseline Starting Commit:** `189680d55339c40ddc98bd294cf42db76b4f44aa`
+**Execution Timestamp:** 2026-11-11
+**Phase 3 Status:** **STRICTLY LOCKED** (No hardware SPI flashing, no live kernel drivers, no PFAT decapsulation)
 **Scope Restriction:** Final IFD correction checkpoint. Broad parser expansion prohibited.
 
 ---
@@ -41,17 +41,22 @@ Under the Phase 2B.5.2 authentic Tiger Point profile identification model, confi
 An audit of all call sites across the codebase established:
 1. `detect_ifd_profile`:
    - Production call sites: **0** (No production code calls this helper).
-   - Test call sites: **0** (All previous tests called `detect_ifd_profile_resolution`).
-2. `detect_ifd_profile_resolution`:
+   - Test call sites: **2** direct function calls (`src-tauri/src/tests/engine_tests.rs:2300` in `test_ifd_context_free_compatibility_api_does_not_falsely_confirm_modern_def65` and line 2330 in `test_ifd_legacy_profile_behavior_correct_where_evidence_available_def65`), plus 1 module import (`src-tauri/src/tests/engine_tests.rs:10`).
+   - Internal delegation: The deprecated helper internally delegates to `detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None, None).profile`.
+2. `detect_ifd_profile_with_context`:
+   - Production call sites: **0** (Public context-aware helper).
+   - Test call sites: **4** (`src-tauri/src/tests/engine_tests.rs`: lines 2247, 2268, 2279, 2320).
+3. `detect_ifd_profile_resolution`:
    - Production call sites:
-     * `src-tauri/src/engine/binary/ifd.rs:1060` (Inside deprecated `detect_ifd_profile`).
-     * `src-tauri/src/engine/binary/ifd.rs:1180` (Inside `IntelFlashDescriptor::parse_with_profile`).
-   - Test call sites: 25 distinct test invocations in `src-tauri/src/tests/engine_tests.rs`.
-3. `IntelFlashDescriptor::parse_with_profile`:
+     * `src-tauri/src/engine/binary/ifd.rs:1064` (Inside `detect_ifd_profile_with_context`).
+     * `src-tauri/src/engine/binary/ifd.rs:1090` (Inside deprecated `detect_ifd_profile`).
+     * `src-tauri/src/engine/binary/ifd.rs:1216` (Inside `IntelFlashDescriptor::parse_with_profile`).
+   - Test call sites: **25** distinct test invocations in `src-tauri/src/tests/engine_tests.rs`.
+4. `IntelFlashDescriptor::parse_with_profile`:
    - Production call sites:
-     * `src-tauri/src/engine/binary/ifd.rs:1068` (Inside `IntelFlashDescriptor::parse`).
+     * `src-tauri/src/engine/binary/ifd.rs:1099` (Inside `IntelFlashDescriptor::parse`).
      * `src-tauri/src/commands/mod.rs:34` (Tauri command handler invoking `IntelFlashDescriptor::parse`).
-   - Test call sites: 2 explicit override test invocations.
+   - Test call sites: **2** explicit override test invocations.
 
 **Conclusion:** Production IFD parsing via `IntelFlashDescriptor::parse` has always extracted `raw_flumap1` directly from offset `0x0EFC` and passed it to `detect_ifd_profile_resolution`. Production parsing never relied on the context-free helper.
 
@@ -69,7 +74,7 @@ An audit of all call sites across the codebase established:
        detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, flumap1, None).profile
    }
    ```
-2. **Deprecation & Warning Contract:** Retained `detect_ifd_profile` for backwards binary compatibility, annotated with `#[deprecated]`, and documented with explicit contract warnings that context-free calls cannot confirm modern profiles without descriptor context and will return `Unknown`.
+2. **Deprecation & Warning Contract (DEF-68):** Retained `detect_ifd_profile` as a deprecated public API for backwards source and API compatibility. No stable Rust binary ABI guarantee is claimed or implied. Callers are explicitly warned via `#[deprecated]` attributes and documentation that context-free calls cannot confirm modern profiles without descriptor context and will return `Unknown`.
 
 ### 2.3 Dedicated Regression Tests
 Added 6 dedicated regression tests in `src-tauri/src/tests/engine_tests.rs`:
