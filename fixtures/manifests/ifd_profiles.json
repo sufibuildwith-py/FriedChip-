@@ -1,0 +1,36 @@
+{
+  "manifest_name": "Intel Flash Descriptor Profile Golden Vectors",
+  "generated_date": "2026-11-10",
+  "profiles_supported": [
+    {
+      "profile": "V1_LEGACY",
+      "chipsets": "ICH8 through Wildcat Point (9-Series) / Bay Trail",
+      "address_mask_bits": 12,
+      "max_regions": 5,
+      "flmstr_rd_shift": 16,
+      "flmstr_wr_shift": 24,
+      "density_field_bits": 3,
+      "max_density_mb": 16,
+      "has_requester_id": true
+    },
+    {
+      "profile": "V1_5_INTERMEDIATE",
+      "chipsets": "Intel Wellsburg / C610 / Grantley Server",
+      "address_mask_bits": 13,
+      "max_regions": 8,
+      "density_field_bits": 4,
+      "has_requester_id": true
+    },
+    {
+      "profile": "V2_MODERN",
+      "chipsets": "Intel 100-Series (Sunrise Point) through 700-Series (Raptor Lake) / Meteor Lake",
+      "address_mask_bits": 15,
+      "max_regions": 16,
+      "flmstr_rd_shift": 8,
+      "flmstr_wr_shift": 20,
+      "density_field_bits": 4,
+      "max_density_mb": 64,
+      "has_requester_id": false
+    }
+  ]
+}

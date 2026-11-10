@@ -6,12 +6,96 @@ use crate::error::AppError;
 pub const IFD_SIGNATURE_OFFSET: usize = 0x10;
 pub const IFD_SIGNATURE_MAGIC: u32 = 0x0FF0A55A;
 
+/// Explicit Intel Flash Descriptor Profiles (DEF-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum IfdProfile {
+    /// IFD v1.0 (Legacy: ICH8 through Wildcat Point / Broadwell, 5-series through 9-series, Bay Trail)
+    V1Legacy,
+    /// IFD v1.5 (Intermediate: Intel Wellsburg C610 / Grantley server platforms with 8 regions)
+    V1_5Intermediate,
+    /// IFD v2.0 (Modern: Skylake / Sunrise Point 100-series through 700-series, Meteor Lake)
+    V2Modern,
+    /// Unknown / Unclassified profile (cannot be safely verified from available markers)
+    Unknown,
+}
+
+/// SPI Clock Frequency representation supporting explicit reserved/repurposed encodings (DEF-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SpiFrequency {
+    Mhz(u32),
+    Reserved(u8),
+    RepurposedEspi(u8),
+}
+
+impl SpiFrequency {
+    pub fn mhz_or_zero(&self) -> u32 {
+        match self {
+            SpiFrequency::Mhz(mhz) => *mhz,
+            _ => 0,
+        }
+    }
+}
+
+/// Decodes raw 3-bit SPI frequency fields from FLCOMP into `SpiFrequency` based on descriptor profile.
+pub fn decode_spi_frequency(bits: u8, profile: IfdProfile) -> SpiFrequency {
+    let val = bits & 0x07;
+    match profile {
+        IfdProfile::V1Legacy | IfdProfile::V1_5Intermediate => match val {
+            0 => SpiFrequency::Mhz(20),
+            1 => SpiFrequency::Mhz(33),
+            2 => SpiFrequency::Mhz(48),
+            4 => SpiFrequency::Mhz(50),
+            _ => SpiFrequency::Reserved(val),
+        },
+        IfdProfile::V2Modern => match val {
+            0 => SpiFrequency::Mhz(20),
+            1 => SpiFrequency::Mhz(33),
+            2 => SpiFrequency::Mhz(48),
+            4 => SpiFrequency::Mhz(30),
+            6 => SpiFrequency::Mhz(17),
+            _ => SpiFrequency::Reserved(val),
+        },
+        IfdProfile::Unknown => match val {
+            0 => SpiFrequency::Mhz(20),
+            1 => SpiFrequency::Mhz(33),
+            2 => SpiFrequency::Mhz(48),
+            4 => SpiFrequency::Mhz(50),
+            _ => SpiFrequency::Reserved(val),
+        },
+    }
+}
+
+/// Legacy helper for raw 3-bit SPI frequency field decoding.
+pub fn decode_spi_frequency_mhz(bits: u8) -> u32 {
+    decode_spi_frequency(bits, IfdProfile::V1Legacy).mhz_or_zero()
+}
+
+/// Profile-aware FLREG register decoding (DEF-16).
+///
+/// Returns `(base_address, limit_address, is_enabled)`.
+/// Inclusive limit semantics: limit address includes 0xFFF offset.
+/// All address calculations use checked/saturating arithmetic.
+pub fn decode_flreg_with_profile(val: u32, profile: IfdProfile) -> (usize, usize, bool) {
+    let (base_mask, limit_mask) = match profile {
+        IfdProfile::V1Legacy => (0x0FFF, 0x0FFF),
+        IfdProfile::V1_5Intermediate => (0x1FFF, 0x1FFF),
+        IfdProfile::V2Modern | IfdProfile::Unknown => (0x7FFF, 0x7FFF),
+    };
+
+    let base_raw = (val & base_mask) as usize;
+    let limit_raw = ((val >> 16) & limit_mask) as usize;
+
+    let base = base_raw.checked_shl(12).unwrap_or(0);
+    let limit = limit_raw.checked_shl(12).map(|l| l | 0xFFF).unwrap_or(0);
+
+    // A region is disabled if limit_raw < base_raw
+    let is_disabled = limit_raw < base_raw;
+    (base, limit, !is_disabled)
+}
+
 /// Decodes an Intel Flash Descriptor FLREG value into `(base, limit)`.
-///
-/// Base address: bits 14:0 shifted left by 12 (4KB pages).
-/// Limit address: bits 30:16 shifted left by 12, with bottom 12 bits set to 0xFFF.
-///
-/// Any bits outside the 15-bit fields (bit 15 and bit 31) are strictly masked out.
 pub fn decode_flreg(val: u32) -> (usize, usize) {
     let base_page = (val & 0x7FFF) as usize;
     let limit_page = ((val >> 16) & 0x7FFF) as usize;
@@ -40,17 +124,27 @@ pub struct Gate2PlatformCompatibility {
     pub passed: bool,
     pub platform_family: String,
     pub descriptor_version: String,
+    pub profile: IfdProfile,
     pub region_count: usize,
     pub enabled_regions: Vec<String>,
     pub compatibility_notes: Vec<String>,
 }
 
-/// Programmer compatibility assessment states.
+/// Programmer compatibility assessment states (DEF-19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProgrammerCompatibilityStatus {
     Compatible,
     Incompatible,
+    Indeterminate,
+}
+
+/// Runtime chipset lock status representation (DEF-18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RuntimeChipsetLockStatus {
+    Locked,
+    Unlocked,
     Indeterminate,
 }
 
@@ -62,6 +156,8 @@ pub struct Gate3ProgrammerCompatibility {
     pub detected_chip_size_bytes: usize,
     pub detected_chip_size_mb: f64,
     pub host_flashing_locked: bool,
+    pub host_descriptor_bios_write_allowed: bool,
+    pub runtime_chipset_lock_status: RuntimeChipsetLockStatus,
     pub hardware_evidence_present: bool,
     pub required_voltage_volts: Option<f64>,
     pub verification_constraints: Vec<String>,
@@ -83,10 +179,14 @@ pub struct FlashComponentsInfo {
     pub flcomp_raw: u32,
     pub component_count: usize,
     pub components: Vec<FlashComponentDensity>,
+    pub read_clock: SpiFrequency,
     pub read_clock_frequency_mhz: u32,
     pub fast_read_supported: bool,
+    pub fast_read_clock: SpiFrequency,
     pub fast_read_clock_frequency_mhz: u32,
+    pub write_erase_clock: SpiFrequency,
     pub write_erase_clock_frequency_mhz: u32,
+    pub read_id_status_clock: SpiFrequency,
     pub read_id_status_clock_frequency_mhz: u32,
 }
 
@@ -117,6 +217,7 @@ pub struct FlashMasterPermissions {
     pub fmba_offset: usize,
     pub master_count: usize,
     pub descriptor_version: String,
+    pub profile: IfdProfile,
     pub masters: Vec<MasterAccessRule>,
     pub host_cpu: MasterAccessRule,
     pub intel_me: MasterAccessRule,
@@ -131,6 +232,7 @@ pub struct FlashMasterPermissions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IfdAnalysisReport {
     pub image_size: usize,
+    pub profile: IfdProfile,
     pub regions: Vec<FlashRegion>,
     pub components: Option<FlashComponentsInfo>,
     pub master_permissions: Option<FlashMasterPermissions>,
@@ -139,77 +241,110 @@ pub struct IfdAnalysisReport {
     pub gate3_programmer: Gate3ProgrammerCompatibility,
 }
 
-/// Decodes raw 3-bit SPI frequency fields from FLCOMP into clock frequency in MHz.
-pub fn decode_spi_frequency_mhz(bits: u8) -> u32 {
-    match bits & 0x07 {
-        0 => 20,
-        1 => 33,
-        2 => 48,
-        4 => 50,
-        _ => 20,
-    }
-}
-
-/// Decodes the 32-bit FLCOMP register at FCBA into `FlashComponentsInfo`.
-pub fn decode_flcomp(fcba_offset: usize, flcomp: u32, component_count: usize) -> FlashComponentsInfo {
+/// Decodes the 32-bit FLCOMP register at FCBA into `FlashComponentsInfo` with profile awareness (DEF-17).
+pub fn decode_flcomp_with_profile(
+    fcba_offset: usize,
+    flcomp: u32,
+    component_count: usize,
+    profile: IfdProfile,
+) -> FlashComponentsInfo {
     let mut comp_densities = Vec::new();
 
-    // Component 1 density (bits 2:0)
-    let raw1 = (flcomp & 0x07) as u8;
-    let size1 = (512 * 1024) << raw1;
-    comp_densities.push(FlashComponentDensity {
-        component_index: 1,
-        raw_bits: raw1,
-        density_bytes: size1,
-        density_mb: size1 as f64 / (1024.0 * 1024.0),
-    });
+    match profile {
+        IfdProfile::V1Legacy => {
+            // IFD v1: 3-bit density fields (bits 2:0 for Comp 1, bits 5:3 for Comp 2)
+            let raw1 = (flcomp & 0x07) as u8;
+            let size1 = if raw1 <= 5 { (512 * 1024) << raw1 } else { 0 };
+            comp_densities.push(FlashComponentDensity {
+                component_index: 1,
+                raw_bits: raw1,
+                density_bytes: size1,
+                density_mb: size1 as f64 / (1024.0 * 1024.0),
+            });
 
-    // Component 2 density (bits 5:3) if component_count >= 2
-    if component_count >= 2 {
-        let raw2 = ((flcomp >> 3) & 0x07) as u8;
-        let size2 = (512 * 1024) << raw2;
-        comp_densities.push(FlashComponentDensity {
-            component_index: 2,
-            raw_bits: raw2,
-            density_bytes: size2,
-            density_mb: size2 as f64 / (1024.0 * 1024.0),
-        });
+            if component_count >= 2 {
+                let raw2 = ((flcomp >> 3) & 0x07) as u8;
+                let size2 = if raw2 <= 5 { (512 * 1024) << raw2 } else { 0 };
+                comp_densities.push(FlashComponentDensity {
+                    component_index: 2,
+                    raw_bits: raw2,
+                    density_bytes: size2,
+                    density_mb: size2 as f64 / (1024.0 * 1024.0),
+                });
+            }
+        }
+        IfdProfile::V1_5Intermediate | IfdProfile::V2Modern | IfdProfile::Unknown => {
+            // IFD v2: 4-bit density fields (bits 3:0 for Comp 1, bits 7:4 for Comp 2)
+            let raw1 = (flcomp & 0x0F) as u8;
+            let size1 = if raw1 <= 7 { (512 * 1024) << raw1 } else { 0 };
+            comp_densities.push(FlashComponentDensity {
+                component_index: 1,
+                raw_bits: raw1,
+                density_bytes: size1,
+                density_mb: size1 as f64 / (1024.0 * 1024.0),
+            });
+
+            if component_count >= 2 {
+                let raw2 = ((flcomp >> 4) & 0x0F) as u8;
+                let size2 = if raw2 <= 7 { (512 * 1024) << raw2 } else { 0 };
+                comp_densities.push(FlashComponentDensity {
+                    component_index: 2,
+                    raw_bits: raw2,
+                    density_bytes: size2,
+                    density_mb: size2 as f64 / (1024.0 * 1024.0),
+                });
+            }
+        }
     }
 
     let freq_read_bits = ((flcomp >> 17) & 0x07) as u8;
-    let read_clock_frequency_mhz = decode_spi_frequency_mhz(freq_read_bits);
+    let read_clock = decode_spi_frequency(freq_read_bits, profile);
+    let read_clock_frequency_mhz = read_clock.mhz_or_zero();
 
     let fast_read_supported = ((flcomp >> 20) & 0x01) == 1;
 
     let freq_fastread_bits = ((flcomp >> 21) & 0x07) as u8;
-    let fast_read_clock_frequency_mhz = decode_spi_frequency_mhz(freq_fastread_bits);
+    let fast_read_clock = decode_spi_frequency(freq_fastread_bits, profile);
+    let fast_read_clock_frequency_mhz = fast_read_clock.mhz_or_zero();
 
     let freq_write_bits = ((flcomp >> 24) & 0x07) as u8;
-    let write_erase_clock_frequency_mhz = decode_spi_frequency_mhz(freq_write_bits);
+    let write_erase_clock = decode_spi_frequency(freq_write_bits, profile);
+    let write_erase_clock_frequency_mhz = write_erase_clock.mhz_or_zero();
 
     let freq_read_id_bits = ((flcomp >> 27) & 0x07) as u8;
-    let read_id_status_clock_frequency_mhz = decode_spi_frequency_mhz(freq_read_id_bits);
+    let read_id_status_clock = decode_spi_frequency(freq_read_id_bits, profile);
+    let read_id_status_clock_frequency_mhz = read_id_status_clock.mhz_or_zero();
 
     FlashComponentsInfo {
         fcba_offset,
         flcomp_raw: flcomp,
         component_count,
         components: comp_densities,
+        read_clock,
         read_clock_frequency_mhz,
         fast_read_supported,
+        fast_read_clock,
         fast_read_clock_frequency_mhz,
+        write_erase_clock,
         write_erase_clock_frequency_mhz,
+        read_id_status_clock,
         read_id_status_clock_frequency_mhz,
     }
 }
 
-/// Decodes an individual 32-bit FLMSTR register into a `MasterAccessRule`.
-pub fn decode_master_rule(
+/// Backwards-compatible decode_flcomp using V1Legacy default.
+pub fn decode_flcomp(fcba_offset: usize, flcomp: u32, component_count: usize) -> FlashComponentsInfo {
+    decode_flcomp_with_profile(fcba_offset, flcomp, component_count, IfdProfile::V1Legacy)
+}
+
+/// Decodes an individual 32-bit FLMSTR register into a `MasterAccessRule` with profile awareness (DEF-18).
+pub fn decode_master_rule_with_profile(
     master_id: usize,
     master_name: &str,
     flmstr: u32,
-    is_v2: bool,
+    profile: IfdProfile,
 ) -> MasterAccessRule {
+    let is_v2 = profile == IfdProfile::V2Modern;
     let (requester_id, read_mask, write_mask) = if !is_v2 {
         // IFD v1 (Legacy ICH8..Wildcat Point / Broadwell, 5-series..9-series)
         // Bits 15:0 = Requester ID
@@ -251,11 +386,88 @@ pub fn decode_master_rule(
     }
 }
 
+/// Backwards-compatible decode_master_rule wrapper.
+pub fn decode_master_rule(
+    master_id: usize,
+    master_name: &str,
+    flmstr: u32,
+    is_v2: bool,
+) -> MasterAccessRule {
+    let profile = if is_v2 { IfdProfile::V2Modern } else { IfdProfile::V1Legacy };
+    decode_master_rule_with_profile(master_id, master_name, flmstr, profile)
+}
+
+/// Detects descriptor profile from verified register characteristics without heuristic region counting (DEF-15).
+pub fn detect_ifd_profile(
+    flmap0: u32,
+    _flmap1: u32,
+    flmap2: u32,
+    flcomp: Option<u32>,
+    flmstr1: Option<u32>,
+) -> IfdProfile {
+    let nr_field = ((flmap0 >> 24) & 0x0F) as u8;
+    let iccriba = ((flmap2 >> 16) & 0xFF) as u8;
+
+    // Check FLMSTR1 shift characteristics
+    if let Some(m1) = flmstr1 {
+        let v2_read_bits = (m1 >> 8) & 0xFFF;
+        let v1_read_bits = (m1 >> 16) & 0xFF;
+
+        // If ICCRIBA indicates 100-series (0x31) or 300-series+ (0x34)
+        if iccriba >= 0x31 {
+            return IfdProfile::V2Modern;
+        }
+
+        // Distinct v2 master shift (rd_shift = 8, wr_shift = 20) with 0 in requester ID bits 7:0
+        if v2_read_bits != 0 && (m1 & 0xFF) == 0 && (m1 & 0x00FF0000) == 0 {
+            return IfdProfile::V2Modern;
+        }
+
+        // Distinct v1 master shift (rd_shift = 16, wr_shift = 24)
+        if v1_read_bits != 0 && (m1 & 0x0000FF00) == 0 && nr_field <= 4 {
+            return IfdProfile::V1Legacy;
+        }
+    }
+
+    // Check FLCOMP read frequency: in Skylake+, freq_read = 6 (17 MHz)
+    if let Some(comp) = flcomp {
+        let freq_read = ((comp >> 17) & 0x07) as u8;
+        if freq_read == 6 {
+            return IfdProfile::V2Modern;
+        }
+    }
+
+    // Standard IFD v1 detection: NR <= 4 (1..5 regions), ICCRIBA < 0x31
+    if nr_field <= 4 && iccriba < 0x31 {
+        return IfdProfile::V1Legacy;
+    }
+
+    // IFD v1.5 intermediate (8 regions, Wellsburg / C610)
+    if nr_field == 7 {
+        return IfdProfile::V1_5Intermediate;
+    }
+
+    // Modern 16-region descriptors (NR = 15 or dropped field with high strap counts)
+    if nr_field >= 9 {
+        return IfdProfile::V2Modern;
+    }
+
+    IfdProfile::Unknown
+}
+
 pub struct IntelFlashDescriptor;
 
 impl IntelFlashDescriptor {
-    /// Inspect a binary dump for an Intel Flash Descriptor and parse its region table and hardware configuration.
+    /// Inspect a binary dump for an Intel Flash Descriptor using automatic profile detection.
     pub fn parse(image_bytes: &[u8]) -> Result<IfdAnalysisReport, AppError> {
+        Self::parse_with_profile(image_bytes, None)
+    }
+
+    /// Inspect a binary dump for an Intel Flash Descriptor with an explicit profile override (DEF-15).
+    pub fn parse_with_profile(
+        image_bytes: &[u8],
+        profile_override: Option<IfdProfile>,
+    ) -> Result<IfdAnalysisReport, AppError> {
         let reader = BinaryReader::new(image_bytes);
         let image_size = reader.len();
 
@@ -273,6 +485,7 @@ impl IntelFlashDescriptor {
         if !has_valid_sig {
             return Ok(IfdAnalysisReport {
                 image_size,
+                profile: IfdProfile::Unknown,
                 regions: Vec::new(),
                 components: None,
                 master_permissions: None,
@@ -292,6 +505,7 @@ impl IntelFlashDescriptor {
                     passed: false,
                     platform_family: "UNCLASSIFIED".to_string(),
                     descriptor_version: "Unknown".to_string(),
+                    profile: IfdProfile::Unknown,
                     region_count: 0,
                     enabled_regions: Vec::new(),
                     compatibility_notes: vec!["Cannot evaluate platform without valid IFD".to_string()],
@@ -302,6 +516,8 @@ impl IntelFlashDescriptor {
                     detected_chip_size_bytes: image_size,
                     detected_chip_size_mb: image_size as f64 / (1024.0 * 1024.0),
                     host_flashing_locked: true,
+                    host_descriptor_bios_write_allowed: false,
+                    runtime_chipset_lock_status: RuntimeChipsetLockStatus::Indeterminate,
                     hardware_evidence_present: false,
                     required_voltage_volts: None,
                     verification_constraints: vec!["Image is not recognized as a valid Intel SPI image".to_string()],
@@ -310,12 +526,6 @@ impl IntelFlashDescriptor {
         }
 
         // 2. Read FLMAP0 at offset 0x14
-        // Spec bitfields:
-        // Bits 7:0:   FCBA (Flash Component Base Address, byte offset = FCBA << 4)
-        // Bits 9:8:   NC (Number Of Components: 0 = 1 component, 1 = 2 components)
-        // Bits 15:10: Reserved
-        // Bits 23:16: FRBA (Flash Region Base Address, byte offset = FRBA << 4)
-        // Bits 26:24 (or 27:24 in v2): NR (Number Of Regions: 0-based, total = NR + 1)
         let flmap0 = reader.read_u32_le(0x14)?;
         let fcba_field = (flmap0 & 0xFF) as usize;
         let fcba = fcba_field << 4;
@@ -326,46 +536,49 @@ impl IntelFlashDescriptor {
         let nr = nr_field.saturating_add(1);
 
         // 3. Read FLMAP1 at offset 0x18
-        // Spec bitfields:
-        // Bits 7:0:   FMBA (Flash Master Base Address, byte offset = FMBA << 4)
-        // Bits 10:8:  NM (Number Of Masters: 0-based, total = NM + 1)
-        // Bits 15:11: Reserved
-        // Bits 23:16: FISBA (Flash ICH/PCH Strap Base Address, byte offset = FISBA << 4)
-        // Bits 31:24: ISL (ICH/PCH Strap Length in Dwords)
         let flmap1 = reader.read_u32_le(0x18)?;
         let fmba_field = (flmap1 & 0xFF) as usize;
         let fmba = fmba_field << 4;
         let nm_field = ((flmap1 >> 8) & 0x07) as u8;
         let nm = nm_field.saturating_add(1);
-        let fisba_field = ((flmap1 >> 16) & 0xFF) as usize;
-        let _fisba = fisba_field << 4;
-        let _isl = ((flmap1 >> 24) & 0xFF) as usize;
 
-        // 4. Read FLMAP2 at offset 0x1C (if available)
-        // Spec bitfields:
-        // Bits 7:0:   FMSBA (Flash MCH/Processor Strap Base Address, byte offset = FMSBA << 4)
-        // Bits 15:8:  MSL (MCH/Processor Strap Length in Dwords)
+        // 4. Read FLMAP2 at offset 0x1C
         let flmap2 = reader.read_u32_le(0x1C).unwrap_or(0);
-        let fmsba_field = (flmap2 & 0xFF) as usize;
-        let _fmsba = fmsba_field << 4;
-        let _msl = ((flmap2 >> 8) & 0xFF) as usize;
+
+        // Read raw FLCOMP and FLMSTR1 for profile resolution
+        let raw_flcomp = if fcba + 4 <= image_size {
+            reader.read_u32_le(fcba).ok()
+        } else {
+            None
+        };
+
+        let raw_flmstr1 = if fmba + 4 <= image_size {
+            reader.read_u32_le(fmba).ok()
+        } else {
+            None
+        };
+
+        // 5. Resolve Profile (DEF-15)
+        let profile = profile_override.unwrap_or_else(|| {
+            detect_ifd_profile(flmap0, flmap1, flmap2, raw_flcomp, raw_flmstr1)
+        });
 
         let mut issues = Vec::new();
 
-        // 5. Decode FCBA (Flash Components Base Address)
+        // 6. Decode FCBA (Flash Components Base Address)
         let mut components_info = None;
         if fcba + 4 > image_size {
             issues.push(format!(
                 "Flash Component Base Address (0x{:X}) extends beyond image size (0x{:X})",
                 fcba + 4, image_size
             ));
-        } else if let Ok(flcomp) = reader.read_u32_le(fcba) {
-            components_info = Some(decode_flcomp(fcba, flcomp, nc as usize));
+        } else if let Some(flcomp) = raw_flcomp {
+            components_info = Some(decode_flcomp_with_profile(fcba, flcomp, nc as usize, profile));
         }
 
-        // 6. Decode FMBA (Flash Master Base Address)
+        // 7. Decode FMBA (Flash Master Base Address)
         let mut master_permissions = None;
-        let mut host_flashing_locked = true;
+        let mut host_descriptor_bios_write_allowed = false;
 
         let master_count = (nm as usize).clamp(1, 4);
         if fmba + (master_count * 4) > image_size {
@@ -375,7 +588,6 @@ impl IntelFlashDescriptor {
             ));
         } else {
             let mut masters = Vec::new();
-            let is_v2 = nr >= 10;
 
             for m_idx in 0..master_count {
                 let reg_offset = fmba + (m_idx * 4);
@@ -387,31 +599,39 @@ impl IntelFlashDescriptor {
                         3 => "Embedded Controller",
                         _ => "Unknown Master",
                     };
-                    masters.push(decode_master_rule(m_idx + 1, master_name, flmstr, is_v2));
+                    masters.push(decode_master_rule_with_profile(m_idx + 1, master_name, flmstr, profile));
                 }
             }
 
             let host_cpu = masters.get(0).cloned().unwrap_or_else(|| {
-                decode_master_rule(1, "Host CPU / BIOS", 0, is_v2)
+                decode_master_rule_with_profile(1, "Host CPU / BIOS", 0, profile)
             });
             let intel_me = masters.get(1).cloned().unwrap_or_else(|| {
-                decode_master_rule(2, "Intel Management Engine", 0, is_v2)
+                decode_master_rule_with_profile(2, "Intel Management Engine", 0, profile)
             });
             let gbe = masters.get(2).cloned().unwrap_or_else(|| {
-                decode_master_rule(3, "Gigabit Ethernet", 0, is_v2)
+                decode_master_rule_with_profile(3, "Gigabit Ethernet", 0, profile)
             });
 
-            host_flashing_locked = !host_cpu.bios_writable;
+            host_descriptor_bios_write_allowed = host_cpu.bios_writable;
 
             let mut flashing_constraints = Vec::new();
             flashing_constraints.push("Flash Master permissions (FLMSTR1) govern in-system host controller requests only.".to_string());
             flashing_constraints.push("Descriptor permissions do NOT establish complete hardware write-protection.".to_string());
             flashing_constraints.push("Complete hardware protection requires interrogation of PCH Protected Range registers (PR0..PR4), BILD lock (BIOS Interface Lock Down), SMM TCO lock, and physical /WP pin state.".to_string());
 
+            let desc_version_str = match profile {
+                IfdProfile::V1Legacy => "IFD v1.0 (Legacy ICH8..Wildcat Point / Broadwell)".to_string(),
+                IfdProfile::V1_5Intermediate => "IFD v1.5 (Intermediate / Wellsburg C610)".to_string(),
+                IfdProfile::V2Modern => "IFD v2.0 (Modern Skylake 100-series..Raptor/Meteor Lake)".to_string(),
+                IfdProfile::Unknown => "IFD Unknown / Unclassified Layout".to_string(),
+            };
+
             master_permissions = Some(FlashMasterPermissions {
                 fmba_offset: fmba,
                 master_count,
-                descriptor_version: if is_v2 { "IFD v2.0 (Skylake+)" } else { "IFD v1.0 (Legacy ICH/PCH)" }.to_string(),
+                descriptor_version: desc_version_str,
+                profile,
                 masters,
                 host_cpu: host_cpu.clone(),
                 intel_me: intel_me.clone(),
@@ -423,8 +643,13 @@ impl IntelFlashDescriptor {
             });
         }
 
-        // 7. Parse Flash Regions at FRBA
-        let max_regions = nr.clamp(5, 16) as usize;
+        // 8. Parse Flash Regions at FRBA (Profile-aware decoding DEF-16)
+        let max_regions = match profile {
+            IfdProfile::V1Legacy => (nr as usize).clamp(1, 5),
+            IfdProfile::V1_5Intermediate => 8,
+            IfdProfile::V2Modern | IfdProfile::Unknown => (nr as usize).clamp(5, 16),
+        };
+
         let mut regions = Vec::new();
         let mut region_table_in_bounds = true;
 
@@ -439,8 +664,9 @@ impl IntelFlashDescriptor {
             for id in 0..max_regions {
                 let reg_offset = frba + (id * 4);
                 if let Ok(reg_val) = reader.read_u32_le(reg_offset) {
-                    let (base, limit) = decode_flreg(reg_val);
+                    let (base, limit, is_enabled) = decode_flreg_with_profile(reg_val, profile);
                     let mut region = FlashRegion::from_raw_bounds(id as u8, base, limit);
+                    region.enabled = is_enabled;
 
                     // Compute SHA-256 for enabled regions completely within bounds
                     if region.enabled && region.limit < image_size {
@@ -454,7 +680,7 @@ impl IntelFlashDescriptor {
             }
         }
 
-        // 8. Run boundary validation
+        // 9. Run boundary validation
         let (boundary_conflicts, boundary_warnings) = validate_region_boundaries(&regions, image_size);
         issues.extend(boundary_warnings);
 
@@ -466,18 +692,30 @@ impl IntelFlashDescriptor {
             .map(|r| format!("{} (0x{:X}..0x{:X})", r.name, r.base, r.limit))
             .collect();
 
-        // 9. Platform classification
-        let platform_family = format!("Intel PCH (Unclassified, Region Count: {})", nr);
-        let descriptor_version = if nr >= 10 {
-            "IFD v2.0 (10+ Regions)".to_string()
-        } else {
-            "IFD v1.0 (Legacy Layout)".to_string()
+        // 10. Platform classification
+        let (platform_family, descriptor_version) = match profile {
+            IfdProfile::V1Legacy => (
+                "Intel Legacy PCH (ICH8 through 9-Series / Bay Trail)".to_string(),
+                "IFD v1.0 (Legacy Layout)".to_string(),
+            ),
+            IfdProfile::V1_5Intermediate => (
+                "Intel Wellsburg / C610 Enterprise PCH".to_string(),
+                "IFD v1.5 (8-Region Intermediate Layout)".to_string(),
+            ),
+            IfdProfile::V2Modern => (
+                "Intel Modern PCH (100-Series through 700-Series / Meteor Lake)".to_string(),
+                "IFD v2.0 (Modern 16-Region Layout)".to_string(),
+            ),
+            IfdProfile::Unknown => (
+                format!("Intel PCH (Unclassified, Region Count: {})", nr),
+                "IFD Unknown / Unclassified".to_string(),
+            ),
         };
 
         let mut compat_notes = Vec::new();
         compat_notes.push(format!("Detected Flash Components: {}", nc));
         compat_notes.push(format!("Detected Flash Masters: {}", nm));
-        compat_notes.push("Chipset generation cannot be verified from region count alone; marked as UNCLASSIFIED pending PCH strap/device ID inspection.".to_string());
+        compat_notes.push(format!("Assigned Profile: {:?}", profile));
         if regions.iter().any(|r| r.region_type == RegionType::Me && r.enabled) {
             compat_notes.push("Intel Management Engine region present".to_string());
         }
@@ -485,7 +723,7 @@ impl IntelFlashDescriptor {
             compat_notes.push("BIOS/UEFI primary payload region present".to_string());
         }
 
-        // 10. Programmer Compatibility Gate (DEF-12)
+        // 11. Programmer Compatibility Gate (DEF-19)
         let fcba_total_capacity: usize = components_info
             .as_ref()
             .map(|c| c.components.iter().map(|d| d.density_bytes).sum())
@@ -520,12 +758,13 @@ impl IntelFlashDescriptor {
         let programmer_status = if !structural_passed || image_size < detected_capacity {
             ProgrammerCompatibilityStatus::Incompatible
         } else {
-            // Without hardware programmer verification, status is strictly Indeterminate
+            // Strictly Indeterminate without physical hardware telemetry
             ProgrammerCompatibilityStatus::Indeterminate
         };
 
         Ok(IfdAnalysisReport {
             image_size,
+            profile,
             regions,
             components: components_info,
             master_permissions,
@@ -542,6 +781,7 @@ impl IntelFlashDescriptor {
                 passed: structural_passed,
                 platform_family,
                 descriptor_version,
+                profile,
                 region_count: nr as usize,
                 enabled_regions,
                 compatibility_notes: compat_notes,
@@ -551,7 +791,9 @@ impl IntelFlashDescriptor {
                 passed: false, // Refuse speculative positive compatibility without hardware
                 detected_chip_size_bytes: detected_capacity,
                 detected_chip_size_mb: detected_capacity as f64 / (1024.0 * 1024.0),
-                host_flashing_locked,
+                host_flashing_locked: !host_descriptor_bios_write_allowed,
+                host_descriptor_bios_write_allowed,
+                runtime_chipset_lock_status: RuntimeChipsetLockStatus::Indeterminate,
                 hardware_evidence_present: false,
                 required_voltage_volts: None,
                 verification_constraints: programmer_constraints,

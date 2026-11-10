@@ -4,7 +4,9 @@ use tempfile::tempdir;
 use crate::db::Database;
 use crate::engine::binary::checksums::sha256_hex;
 use crate::engine::binary::ifd::{
-    decode_flreg, IntelFlashDescriptor, ProgrammerCompatibilityStatus, IFD_SIGNATURE_MAGIC,
+    decode_flreg, decode_flreg_with_profile, decode_spi_frequency, IfdProfile,
+    IntelFlashDescriptor, ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus, SpiFrequency,
+    IFD_SIGNATURE_MAGIC,
 };
 use crate::engine::binary::reader::BinaryReader;
 use crate::engine::binary::region::RegionType;
@@ -120,6 +122,10 @@ fn test_ifd_valid_image_parsing_and_gates() {
     assert_eq!(report.gate3_programmer.detected_chip_size_bytes, 16 * 1024 * 1024);
     assert_eq!(report.gate3_programmer.detected_chip_size_mb, 16.0);
     assert!(!report.gate3_programmer.hardware_evidence_present);
+    assert_eq!(report.profile, IfdProfile::V1Legacy);
+    assert_eq!(report.gate2_platform.profile, IfdProfile::V1Legacy);
+    assert!(report.gate3_programmer.host_descriptor_bios_write_allowed);
+    assert_eq!(report.gate3_programmer.runtime_chipset_lock_status, RuntimeChipsetLockStatus::Indeterminate);
 }
 
 #[test]
@@ -282,6 +288,101 @@ fn test_ifd_truncated_under_4kb_rejection() {
 }
 
 #[test]
+fn test_ifd_v2_valid_image_parsing_and_profile_detection() {
+    let img = SyntheticFixtureBuilder::build_valid_ifd_v2_image(16 * 1024 * 1024);
+    let report = IntelFlashDescriptor::parse(&img).unwrap();
+
+    assert!(report.gate1_structural.passed);
+    assert_eq!(report.profile, IfdProfile::V2Modern);
+    assert_eq!(report.gate2_platform.profile, IfdProfile::V2Modern);
+    assert!(report.gate2_platform.descriptor_version.contains("IFD v2.0"));
+    assert_eq!(report.regions.len(), 16);
+
+    let comp = report.components.as_ref().expect("Components info must be decoded");
+    assert_eq!(comp.components[0].density_bytes, 16 * 1024 * 1024);
+    assert_eq!(comp.read_clock, SpiFrequency::Mhz(17)); // 100-series Skylake marker
+    assert_eq!(comp.read_clock_frequency_mhz, 17);
+    assert_eq!(comp.fast_read_clock, SpiFrequency::Mhz(30)); // IFD v2 30 MHz
+
+    let perms = report.master_permissions.as_ref().expect("Master permissions must be decoded");
+    assert_eq!(perms.profile, IfdProfile::V2Modern);
+    assert!(perms.host_cpu.bios_writable);
+    assert!(perms.host_bios_writable);
+    assert!(!perms.host_me_writable);
+}
+
+#[test]
+fn test_ifd_flreg_profile_aware_decoding_and_boundary_checks() {
+    // 1. IFD v1 12-bit address mask test (0x0FFF)
+    // val: base 0x000, limit 0x0FFF (inclusive -> 0x000FFFFF = 16MB)
+    let (b1, l1, en1) = decode_flreg_with_profile(0x0FFF0000, IfdProfile::V1Legacy);
+    assert!(en1);
+    assert_eq!(b1, 0x00000000);
+    assert_eq!(l1, 0x00FFFFFF);
+
+    // If bit 14 is set on v1 (0x4000), it must be masked out to 0
+    let (b_v1_masked, _, _) = decode_flreg_with_profile(0x00004000, IfdProfile::V1Legacy);
+    assert_eq!(b_v1_masked, 0x00000000);
+
+    // 2. IFD v2 15-bit address mask test (0x7FFF)
+    // If bit 14 is set on v2 (0x4000), it shifts to 64 MB (0x04000000)
+    let (b_v2, l_v2, en2) = decode_flreg_with_profile(0x7FFF4000, IfdProfile::V2Modern);
+    assert!(en2);
+    assert_eq!(b_v2, 0x04000000);
+    assert_eq!(l_v2, 0x07FFFFFF); // 128 MB limit
+
+    // 3. Disabled region tests
+    // Limit < Base (0x00007FFF: base = 0x7FFF, limit = 0x0000)
+    let (_, _, en_dis) = decode_flreg_with_profile(0x00007FFF, IfdProfile::V2Modern);
+    assert!(!en_dis);
+
+    // Both zero -> valid 4KB region (Region 0: Flash Descriptor 0x00000000..0x00000FFF)
+    let (b_zero, l_zero, en_zero) = decode_flreg_with_profile(0x00000000, IfdProfile::V2Modern);
+    assert!(en_zero);
+    assert_eq!(b_zero, 0x00000000);
+    assert_eq!(l_zero, 0x00000FFF);
+}
+
+#[test]
+fn test_ifd_flcomp_reserved_frequency_handling() {
+    // Raw register with reserved frequency bit encoding 3 (0b011) at bits 19:17
+    let raw: u32 = 0x05 | (3 << 17);
+    let decoded = crate::engine::binary::ifd::decode_flcomp_with_profile(0x80, raw, 1, IfdProfile::V1Legacy);
+
+    // Must be explicitly represented as Reserved(3) and not silently defaulted to 20 MHz
+    assert_eq!(decoded.read_clock, SpiFrequency::Reserved(3));
+    assert_eq!(decoded.read_clock_frequency_mhz, 0);
+
+    let freq_v2 = decode_spi_frequency(6, IfdProfile::V2Modern);
+    assert_eq!(freq_v2, SpiFrequency::Mhz(17));
+}
+
+#[test]
+fn test_ifd_differential_regression_against_coreboot_ifdtool() {
+    // Verifies differential parity with coreboot util/ifdtool/ifdtool.h and ifdtool.c:
+    // 1. Master bit shifts
+    // coreboot: FLMSTR_WR_SHIFT_V1 = 24, FLMSTR_RD_SHIFT_V1 = 16
+    // coreboot: FLMSTR_WR_SHIFT_V2 = 20, FLMSTR_RD_SHIFT_V2 = 8
+    let flmstr_v1_golden = (0x02 << 24) | (0x17 << 16);
+    let rule_v1 = crate::engine::binary::ifd::decode_master_rule_with_profile(1, "CPU", flmstr_v1_golden, IfdProfile::V1Legacy);
+    assert!(rule_v1.bios_writable);
+    assert!(rule_v1.bios_readable);
+    assert!(rule_v1.me_readable);
+
+    let flmstr_v2_golden = (0x02 << 20) | (0x03 << 8);
+    let rule_v2 = crate::engine::binary::ifd::decode_master_rule_with_profile(1, "CPU", flmstr_v2_golden, IfdProfile::V2Modern);
+    assert!(rule_v2.bios_writable);
+    assert!(rule_v2.bios_readable);
+    assert!(!rule_v2.me_readable);
+
+    // 2. Component densities
+    // coreboot: COMPONENT_DENSITY_512KB = 0, COMPONENT_DENSITY_16MB = 5, COMPONENT_DENSITY_64MB = 7, COMPONENT_DENSITY_UNUSED = 0xf
+    let flcomp_v2 = crate::engine::binary::ifd::decode_flcomp_with_profile(0x80, 0x0F5, 2, IfdProfile::V2Modern);
+    assert_eq!(flcomp_v2.components[0].density_bytes, 16 * 1024 * 1024);
+    assert_eq!(flcomp_v2.components[1].density_bytes, 0); // 0xF is unused
+}
+
+#[test]
 fn test_ifd_frba_out_of_bounds_handling() {
     let mut small_img = SyntheticFixtureBuilder::build_valid_ifd_image(4096);
     // In FLMAP0 (0x14..0x18), set FRBA (byte 0x16) to 0xFF (offset 4080)
@@ -294,7 +395,7 @@ fn test_ifd_frba_out_of_bounds_handling() {
 }
 
 // -----------------------------------------------------------------------------
-// IN-PROCESS BOUNDED STRESS / FUZZING CAMPAIGN (DEF-14)
+// IN-PROCESS BOUNDED STRUCTURE-AWARE STRESS / FUZZING CAMPAIGN (DEF-14, DEF-22)
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -310,41 +411,72 @@ fn test_in_process_bounded_parser_stress_fuzzing() {
     let start = Instant::now();
     let iterations = 100_000;
 
-    // 1. Fuzz IntelFlashDescriptor::parse with arbitrary malformed headers
-    for _ in 0..iterations {
-        let len = (next_u32() % 4096) as usize + 64;
-        let mut buf = vec![0u8; len];
-        for chunk in buf.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&next_u32().to_le_bytes());
-        }
+    let ifd_seed = SyntheticFixtureBuilder::build_valid_ifd_image(4096);
+    let pfs_seed = SyntheticFixtureBuilder::build_synthetic_dell_pfs(&[("BIOS", "1.0", b"TEST_PAYLOAD")]);
+    let fv_seed = SyntheticFixtureBuilder::build_valid_firmware_volume(4096);
+
+    // 1. Structure-aware fuzzing of Intel Flash Descriptor
+    for i in 0..iterations {
+        let buf = if (i % 4) == 0 {
+            let mut seeded = ifd_seed.clone();
+            let mut_pos = (next_u32() as usize) % seeded.len();
+            let mut_val = (next_u32() & 0xFF) as u8;
+            seeded[mut_pos] ^= mut_val;
+            seeded
+        } else {
+            let len = (next_u32() % 4096) as usize + 64;
+            let mut b = vec![0u8; len];
+            for chunk in b.chunks_exact_mut(4) {
+                chunk.copy_from_slice(&next_u32().to_le_bytes());
+            }
+            b
+        };
         let _ = IntelFlashDescriptor::parse(&buf);
     }
 
-    // 2. Fuzz DellPfsParser::extract with arbitrary truncated/mutated containers
-    for _ in 0..iterations {
-        let len = (next_u32() % 2048) as usize + 32;
-        let mut buf = vec![0u8; len];
-        for chunk in buf.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&next_u32().to_le_bytes());
-        }
+    // 2. Structure-aware fuzzing of Dell PFS Container
+    for i in 0..iterations {
+        let buf = if (i % 4) == 0 {
+            let mut seeded = pfs_seed.clone();
+            let mut_pos = (next_u32() as usize) % seeded.len();
+            let mut_val = (next_u32() & 0xFF) as u8;
+            seeded[mut_pos] ^= mut_val;
+            seeded
+        } else {
+            let len = (next_u32() % 2048) as usize + 32;
+            let mut b = vec![0u8; len];
+            for chunk in b.chunks_exact_mut(4) {
+                chunk.copy_from_slice(&next_u32().to_le_bytes());
+            }
+            b
+        };
         if DellPfsParser::is_dell_pfs(&buf) {
             let _ = DellPfsParser::extract(&buf, None, "fuzz_input");
         }
     }
 
-    // 3. Fuzz FirmwareVolume::find_volumes with arbitrary byte streams
-    for _ in 0..iterations {
-        let len = (next_u32() % 4096) as usize + 64;
-        let mut buf = vec![0u8; len];
-        for chunk in buf.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&next_u32().to_le_bytes());
-        }
+    // 3. Structure-aware fuzzing of UEFI Firmware Volumes
+    for i in 0..iterations {
+        let buf = if (i % 4) == 0 {
+            let mut seeded = fv_seed.clone();
+            let mut_pos = (next_u32() as usize) % seeded.len();
+            let mut_val = (next_u32() & 0xFF) as u8;
+            seeded[mut_pos] ^= mut_val;
+            seeded
+        } else {
+            let len = (next_u32() % 4096) as usize + 64;
+            let mut b = vec![0u8; len];
+            for chunk in b.chunks_exact_mut(4) {
+                chunk.copy_from_slice(&next_u32().to_le_bytes());
+            }
+            b
+        };
         let _ = FirmwareVolume::find_volumes(&buf);
     }
 
     let elapsed = start.elapsed();
     println!(
-        "[FUZZ EVIDENCE] In-process bounded fuzzing completed: 3 x {} (300,000 total iterations) in {:.2?} with 0 crashes or hangs.",
+        "[FUZZ EVIDENCE] In-process structure-aware fuzzing completed: 3 x {} (300,000 total iterations) in {:.2?} with 0 crashes or hangs.",
         iterations, elapsed
     );
 }

@@ -16,7 +16,7 @@ pub fn encode_flreg(base: usize, limit: usize) -> u32 {
 pub struct SyntheticFixtureBuilder;
 
 impl SyntheticFixtureBuilder {
-    /// Builds a deterministic 16MB Intel SPI flash image with valid IFD, BIOS, ME, and GbE regions.
+    /// Builds a deterministic 16MB Intel SPI flash image with valid IFD v1.0, BIOS, ME, and GbE regions.
     pub fn build_valid_ifd_image(total_size: usize) -> Vec<u8> {
         let mut data = vec![0xFFu8; total_size];
 
@@ -39,6 +39,13 @@ impl SyntheticFixtureBuilder {
         // Bits 31:24: ISL = 0x02
         let flmap1: u32 = (0x02 << 24) | (0x10 << 16) | (0x02 << 8) | 0x06;
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
+
+        // 3b. FLMAP2 at 0x1C:
+        // Bits 7:0: FMSBA = 0x00
+        // Bits 15:8: MSL = 0x00
+        // Bits 23:16: ICCRIBA = 0x00 (Legacy ICH/PCH indicator)
+        let flmap2: u32 = 0x00000000;
+        data[0x1C..0x20].copy_from_slice(&flmap2.to_le_bytes());
 
         // 4. FCBA at 0x80: FLCOMP register
         // Bits 2:0: comp1_density = 5 (16MB)
@@ -64,7 +71,7 @@ impl SyntheticFixtureBuilder {
         let flmstr3: u32 = (0x08 << 16) | (0x08 << 24);
         data[fmba + 8..fmba + 12].copy_from_slice(&flmstr3.to_le_bytes());
 
-        // 4. Region table at FRBA (0x40)
+        // 6. Region table at FRBA (0x40)
         let frba = 0x40;
         let reg0 = encode_flreg(0x0000, 0x0FFF);             // Descriptor: 0x0000..0x0FFF (4KB)
         let reg1 = encode_flreg(0x600000, total_size - 1);    // BIOS: 6MB..16MB
@@ -82,6 +89,74 @@ impl SyntheticFixtureBuilder {
         let fill_end = total_size.min(0x2000);
         for i in 0x1000..fill_end {
             data[i] = ((i * 13 + 0x37) & 0xFF) as u8;
+        }
+
+        data
+    }
+
+    /// Builds a deterministic modern IFD v2.0 SPI flash image (Skylake/Sunrise Point+ 100-series through 700-series).
+    pub fn build_valid_ifd_v2_image(total_size: usize) -> Vec<u8> {
+        let mut data = vec![0xFFu8; total_size];
+
+        // 1. Signature at offset 0x10
+        let sig_bytes = IFD_SIGNATURE_MAGIC.to_le_bytes();
+        data[IFD_SIGNATURE_OFFSET..IFD_SIGNATURE_OFFSET + 4].copy_from_slice(&sig_bytes);
+
+        // 2. FLMAP0 at 0x14:
+        // FCBA = 0x0A (0xA0), NC = 0 (1 comp), FRBA = 0x04 (0x40), NR = 0x0F (16 regions)
+        let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+        data[0x14..0x18].copy_from_slice(&flmap0.to_le_bytes());
+
+        // 3. FLMAP1 at 0x18:
+        // FMBA = 0x08 (0x80), NM = 2 (3 masters), FISBA = 0x10 (0x100), ISL = 0x50
+        let flmap1: u32 = (0x50 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+        data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
+
+        // 4. FLMAP2 at 0x1C:
+        // FMSBA = 0x20 (0x200), MSL = 0x02, ICCRIBA = 0x31 (100-series Sunrise Point marker)
+        let flmap2: u32 = (0x31 << 16) | (0x02 << 8) | 0x20;
+        data[0x1C..0x20].copy_from_slice(&flmap2.to_le_bytes());
+
+        // 5. FCBA at 0xA0: FLCOMP register (v2 4-bit densities)
+        // Bits 3:0: comp1_density = 5 (16MB)
+        // Bits 7:4: comp2_density = 0x0F (Unused)
+        // Bits 19:17: freq_read = 6 (17MHz Skylake marker)
+        // Bit 20: fastread = 1
+        // Bits 23:21: freq_fastread = 4 (30MHz in IFD v2)
+        // Bits 26:24: freq_write = 1 (33MHz)
+        // Bits 29:27: freq_read_id = 1 (33MHz)
+        let fcba = 0xA0;
+        let flcomp: u32 = 0x05 | (0x0F << 4) | (6 << 17) | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27);
+        data[fcba..fcba + 4].copy_from_slice(&flcomp.to_le_bytes());
+
+        // 6. FMBA at 0x80: Master section (v2 bit shifts: rd_shift = 8, wr_shift = 20)
+        let fmba = 0x80;
+        // FLMSTR1 (Host CPU / BIOS): Read Descriptor(0), BIOS(1) -> 0x03 << 8; Write BIOS(1) -> 0x02 << 20
+        let flmstr1: u32 = (0x02 << 20) | (0x03 << 8);
+        data[fmba..fmba + 4].copy_from_slice(&flmstr1.to_le_bytes());
+
+        // FLMSTR2 (Intel ME): Read Descriptor(0), ME(2) -> 0x05 << 8; Write ME(2) -> 0x04 << 20
+        let flmstr2: u32 = (0x04 << 20) | (0x05 << 8);
+        data[fmba + 4..fmba + 8].copy_from_slice(&flmstr2.to_le_bytes());
+
+        // FLMSTR3 (GbE): Read GbE(3) -> 0x08 << 8; Write GbE(3) -> 0x08 << 20
+        let flmstr3: u32 = (0x08 << 20) | (0x08 << 8);
+        data[fmba + 8..fmba + 12].copy_from_slice(&flmstr3.to_le_bytes());
+
+        // 7. Region table at FRBA (0x40): 16 regions with 15-bit addressing
+        let frba = 0x40;
+        let reg0 = encode_flreg(0x0000, 0x0FFF);             // Descriptor: 0x0000..0x0FFF (4KB)
+        let reg1 = encode_flreg(0x600000, total_size - 1);    // BIOS: 6MB..16MB
+        let reg2 = encode_flreg(0x1000, 0x5FFFFF);           // ME: 4KB..6MB
+        data[frba..frba + 4].copy_from_slice(&reg0.to_le_bytes());
+        data[frba + 4..frba + 8].copy_from_slice(&reg1.to_le_bytes());
+        data[frba + 8..frba + 12].copy_from_slice(&reg2.to_le_bytes());
+
+        // Regions 3..15 disabled (0x00007FFF)
+        let disabled_reg: u32 = 0x00007FFF;
+        for i in 3..16 {
+            let offset = frba + (i * 4);
+            data[offset..offset + 4].copy_from_slice(&disabled_reg.to_le_bytes());
         }
 
         data

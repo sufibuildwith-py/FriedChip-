@@ -1,0 +1,29 @@
+{
+  "manufacturer": "Dell Inc.",
+  "model": "Latitude 5490 / 5590",
+  "package_version": "1.41.0",
+  "filename": "Latitude_5X90_1.41.0.exe",
+  "expected_sha256": "E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B",
+  "file_size": 13662488,
+  "format": "Dell PFS Update Container (PE SFX)",
+  "source": "Dell Official Driver Portal (Support for Latitude 5490)",
+  "acquisition_date": "2026-11-10",
+  "redistribution_status": "Proprietary OEM Binary (Local Fixture Only - Do Not Commit to Public Git)",
+  "parser_paths_exercised": [
+    "DellPfsContainer::extract_components",
+    "PFS header parsing (PFS.HDR.)",
+    "Section discovery and GUID parsing",
+    "Component Directory Table (CDT) parsing",
+    "ZLIB payload stream decompression",
+    "Inverted CRC-32 footer validation",
+    "Firmware Volume encapsulation preservation"
+  ],
+  "expected_components": 14,
+  "known_structural_characteristics": {
+    "sections_count": 2,
+    "has_system_bios": true,
+    "has_management_engine": true,
+    "compression": "ZLIB deflate",
+    "checksum": "Inverted CRC-32 with Section XOR Checksum"
+  }
+}
