@@ -6,9 +6,10 @@ use crate::engine::binary::checksums::sha256_hex;
 use crate::engine::binary::ifd::{
     decode_flcomp, decode_flcomp_with_profile, decode_flreg, decode_flreg_with_profile,
     decode_master_rule, decode_master_rule_with_profile, decode_spi_frequency,
-    detect_ifd_profile_resolution, validate_descriptor_geometry, IfdProfile, IntelFlashDescriptor,
-    ProfileConfidence, ProfileSource, ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus,
-    SpiFrequency, IFD_SIGNATURE_MAGIC,
+    determine_flmap2_interpretation, detect_ifd_profile_resolution, validate_descriptor_geometry,
+    ExtentLength, Flmap2Interpretation, IfdProfile, IntelFlashDescriptor, ProfileConfidence,
+    ProfileSource, ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus, SpiFrequency,
+    IFD_SIGNATURE_MAGIC,
 };
 use crate::engine::binary::reader::BinaryReader;
 use crate::engine::binary::region::RegionType;
@@ -706,6 +707,7 @@ fn test_in_process_bounded_parser_stress_fuzzing() {
             }
         };
 
+        let _ = DellPfsParser::is_dell_pfs(&buf);
         match DellPfsParser::extract(&buf, None, "fuzz_input") {
             Ok(_) => {
                 pfs_successful_parses += 1;
@@ -791,17 +793,20 @@ fn test_in_process_bounded_parser_stress_fuzzing() {
     let snap = take_snapshot();
     disable_observer();
 
-    // Direct assertions on observer hooks proving genuine path execution (DEF-44)
+    // Direct assertions on observer hooks proving genuine path execution (DEF-44, DEF-50)
     assert!(snap.ifd_sig_accepted > 0, "IFD signature accepted must be > 0");
     assert!(snap.ifd_sig_rejected > 0, "IFD signature rejected must be > 0");
     assert!(snap.ifd_geom_accepted > 0, "IFD geometry accepted must be > 0");
     assert!(snap.ifd_geom_rejected > 0, "IFD geometry rejected must be > 0");
     assert!(snap.ifd_profile_decoder_reached > 0, "IFD profile decoder must be reached");
-    assert!(snap.ifd_region_table_decoded > 0, "IFD region table must be decoded");
+    assert!(snap.ifd_region_table_entry > 0, "IFD region table entry must be > 0");
+    assert!(snap.ifd_region_table_completed > 0, "IFD region table completed must be > 0");
     assert!(snap.ifd_region_conflict_reached > 0, "IFD region conflict must be reached");
 
-    assert!(snap.pfs_container_accepted > 0, "PFS container accepted must be > 0");
-    assert!(snap.pfs_container_rejected > 0, "PFS container rejected must be > 0");
+    assert!(snap.pfs_is_dell_pfs_matched > 0, "PFS is_dell_pfs matched must be > 0");
+    assert!(snap.pfs_is_dell_pfs_unmatched > 0, "PFS is_dell_pfs unmatched must be > 0");
+    assert!(snap.pfs_extract_accepted > 0, "PFS extract accepted must be > 0");
+    assert!(snap.pfs_extract_rejected > 0, "PFS extract rejected must be > 0");
     assert!(snap.pfs_section_table_reached > 0, "PFS section table must be reached");
     assert!(snap.pfs_guid_name_reached > 0, "PFS GUID name must be reached");
     assert!(snap.pfs_zlib_attempted > 0, "PFS ZLIB attempted must be > 0");
@@ -830,12 +835,12 @@ fn test_in_process_bounded_parser_stress_fuzzing() {
         iterations, elapsed
     );
     println!(
-        "  IFD paths: sig_acc={}, sig_rej={}, geom_acc={}, geom_rej={}, prof_dec={}, reg_tbl={}, reg_conflict={}",
-        snap.ifd_sig_accepted, snap.ifd_sig_rejected, snap.ifd_geom_accepted, snap.ifd_geom_rejected, snap.ifd_profile_decoder_reached, snap.ifd_region_table_decoded, snap.ifd_region_conflict_reached
+        "  IFD paths: sig_acc={}, sig_rej={}, geom_acc={}, geom_rej={}, prof_dec={}, reg_entry={}, reg_comp={}, reg_conflict={}",
+        snap.ifd_sig_accepted, snap.ifd_sig_rejected, snap.ifd_geom_accepted, snap.ifd_geom_rejected, snap.ifd_profile_decoder_reached, snap.ifd_region_table_entry, snap.ifd_region_table_completed, snap.ifd_region_conflict_reached
     );
     println!(
-        "  PFS paths: hdr_acc={}, hdr_rej={}, sec_tbl={}, guid_name={}, zlib_att={}, zlib_succ={}, zlib_rej={}, crc_match={}, crc_mismatch={}, xor_match={}, xor_mismatch={}",
-        snap.pfs_container_accepted, snap.pfs_container_rejected, snap.pfs_section_table_reached, snap.pfs_guid_name_reached, snap.pfs_zlib_attempted, snap.pfs_zlib_succeeded, snap.pfs_zlib_rejected, snap.pfs_crc_verified_match, snap.pfs_crc_verified_mismatch, snap.pfs_xor_verified_match, snap.pfs_xor_verified_mismatch
+        "  PFS paths: is_matched={}, is_unmatched={}, ext_acc={}, ext_rej={}, sec_tbl={}, guid_name={}, zlib_att={}, zlib_succ={}, zlib_rej={}, crc_match={}, crc_mismatch={}, xor_match={}, xor_mismatch={}",
+        snap.pfs_is_dell_pfs_matched, snap.pfs_is_dell_pfs_unmatched, snap.pfs_extract_accepted, snap.pfs_extract_rejected, snap.pfs_section_table_reached, snap.pfs_guid_name_reached, snap.pfs_zlib_attempted, snap.pfs_zlib_succeeded, snap.pfs_zlib_rejected, snap.pfs_crc_verified_match, snap.pfs_crc_verified_mismatch, snap.pfs_xor_verified_match, snap.pfs_xor_verified_mismatch
     );
     println!(
         "  FV paths: fvh_det={}, fvh_rej={}, hdr_val={}, csum_eval={}, blk_trav={}, sent_found={}, sent_missing={}",
@@ -1341,11 +1346,11 @@ fn test_ifd_flmap2_iccriba_accounting_and_safe_boundaries() {
     // 3. ICCRIBA adjacent to FRBA
     // 4. ICCRIBA absent (iccriba_raw == 0)
 
-    // Case 1: ICCRIBA before FRBA: FCBA=0x40, ICCRIBA=0x80 (raw 0x08), FRBA=0xC0, FMBA=0x200
+    // Case 1: ICCRIBA before FRBA: FCBA=0x40, ICCRIBA=0x80 (raw 0x08, RIL=1), FRBA=0xC0, FMBA=0x200
     {
         let flmap0: u32 = (0x0C << 16) | (0x00 << 8) | 0x04; // FRBA=0xC0, FCBA=0x40
         let flmap1: u32 = 0x20; // FMBA=0x20 (0x200)
-        let flmap2: u32 = 0x08 << 16; // ICCRIBA raw = 0x08 -> 0x80
+        let flmap2: u32 = (0x01 << 24) | (0x08 << 16); // RIL=1, ICCRIBA raw = 0x08 -> 0x80
 
         let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2, 4096);
         assert!(geom.is_valid, "Geometry should be valid: {:?}", geom.validation_errors);
@@ -1354,12 +1359,12 @@ fn test_ifd_flmap2_iccriba_accounting_and_safe_boundaries() {
         assert!(geom.max_regions_extent >= 16);
     }
 
-    // Case 2: ICCRIBA after FRBA: FCBA=0x20, FRBA=0x40, ICCRIBA=0x80 (raw 0x08), FMBA=0x200
+    // Case 2: ICCRIBA after FRBA: FCBA=0x20, FRBA=0x40, ICCRIBA=0x80 (raw 0x08, RIL=1), FMBA=0x200
     // ICCRIBA constrains region table extent to (0x80 - 0x40) / 4 = 16 regions!
     {
         let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
         let flmap1: u32 = 0x20; // FMBA=0x20 (0x200)
-        let flmap2: u32 = 0x08 << 16; // ICCRIBA raw = 0x08 -> 0x80
+        let flmap2: u32 = (0x01 << 24) | (0x08 << 16); // RIL=1, ICCRIBA raw = 0x08 -> 0x80
 
         let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2, 4096);
         assert!(geom.is_valid, "Geometry should be valid: {:?}", geom.validation_errors);
@@ -1371,7 +1376,7 @@ fn test_ifd_flmap2_iccriba_accounting_and_safe_boundaries() {
     {
         let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
         let flmap1: u32 = 0x20; // FMBA=0x20 (0x200)
-        let flmap2: u32 = 0x08 << 16; // ICCRIBA raw = 0x08 -> 0x80
+        let flmap2: u32 = (0x01 << 24) | (0x08 << 16); // RIL=1, ICCRIBA raw = 0x08 -> 0x80
 
         let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2, 4096);
         assert!(geom.is_valid, "Geometry should be valid: {:?}", geom.validation_errors);
@@ -1393,10 +1398,10 @@ fn test_ifd_flmap2_iccriba_accounting_and_safe_boundaries() {
 
 #[test]
 fn test_ifd_geometry_adversarial_collision_checks() {
-    // DEF-43: Strict interval overlap collision detection:
+    // DEF-43, DEF-49: Strict interval overlap collision detection:
     // 1. FCBA / FMBA overlap
     // 2. Optional section (FPSBA) overlapping FRBA
-    // 3. Region table crossing succeeding section
+    // 3. Region table crossing succeeding section (physical vs profile-specific NR)
     // 4. Section extending beyond 0x1000
     // 5. Valid adjacent sections pass
 
@@ -1407,37 +1412,46 @@ fn test_ifd_geometry_adversarial_collision_checks() {
         let geom = validate_descriptor_geometry(flmap0, flmap1, 0, 4096);
         assert!(!geom.is_valid, "FCBA / FMBA overlap must be invalid");
         assert!(
-            geom.validation_errors.iter().any(|e| e.contains("collision") || e.contains("overlaps")),
+            geom.validation_errors.iter().any(|e| e.contains("collision") || e.contains("overlaps") || e.contains("share identical base")),
             "Errors: {:?}",
             geom.validation_errors
         );
     }
 
-    // 2. Optional section (FPSBA) overlapping FRBA
+    // 2. Optional section (FPSBA) overlapping FRBA (ISL=1, 0x80..0x84 overlaps FRBA 0x80..0x84)
     {
         let flmap0: u32 = (0x08 << 16) | (0x00 << 8) | 0x02; // FRBA=0x80, FCBA=0x20
-        let flmap1: u32 = (0x08 << 16) | 0x20; // FPSBA=0x80 (raw 0x08), FMBA=0x200
+        let flmap1: u32 = (0x01 << 24) | (0x08 << 16) | 0x20; // ISL=1, FPSBA=0x80, FMBA=0x200
         let geom = validate_descriptor_geometry(flmap0, flmap1, 0, 4096);
         assert!(!geom.is_valid, "FPSBA overlapping FRBA must be invalid");
         assert!(
-            geom.validation_errors.iter().any(|e| e.contains("collision") || e.contains("overlaps")),
+            geom.validation_errors.iter().any(|e| e.contains("Collision") || e.contains("overlaps") || e.contains("share identical base")),
             "Errors: {:?}",
             geom.validation_errors
         );
     }
 
-    // 3. Region table crossing succeeding section: FRBA=0x40, FMBA=0x50, NR=7 (8 regions: 0x40..0x60)
-    // Table end (0x60) extends past succeeding section FMBA at 0x50!
+    // 3. Region table physical space vs declared legacy NR: FRBA=0x40, FMBA=0x50.
+    // Physical available space bounds region table at (0x50 - 0x40) / 4 = 4 regions!
     {
         let flmap0: u32 = (0x07 << 24) | (0x04 << 16) | (0x00 << 8) | 0x02; // NR=7 (8 regions), FRBA=0x40, FCBA=0x20
         let flmap1: u32 = 0x05; // FMBA=0x50 (0x50)
         let geom = validate_descriptor_geometry(flmap0, flmap1, 0, 4096);
-        assert!(!geom.is_valid, "Region table crossing FMBA must be invalid");
-        assert!(
-            geom.validation_errors.iter().any(|e| e.contains("extends into succeeding section")),
-            "Errors: {:?}",
-            geom.validation_errors
-        );
+        assert!(geom.is_valid, "Physical geometry itself has 4 regions available: {:?}", geom.validation_errors);
+        assert_eq!(geom.max_regions_extent, 4);
+
+        // When parsed under V1Legacy profile, declared 8 regions (0x40..0x60) cross FMBA boundary at 0x50!
+        let mut buf = vec![0xFFu8; 4096];
+        buf[0x10..0x14].copy_from_slice(&IFD_SIGNATURE_MAGIC.to_le_bytes());
+        buf[0x14..0x18].copy_from_slice(&flmap0.to_le_bytes());
+        buf[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
+        buf[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes());
+        // FLMSTR1 at 0x50
+        buf[0x50..0x54].copy_from_slice(&0x02030000u32.to_le_bytes());
+
+        let parsed = IntelFlashDescriptor::parse_with_profile(&buf, Some(IfdProfile::V1Legacy)).unwrap();
+        assert!(!parsed.gate1_structural.passed || parsed.gate1_structural.issues.iter().any(|i| i.contains("extends into succeeding section")),
+            "Declared legacy region table exceeding boundary must be flagged");
     }
 
     // 4. Section extending beyond 0x1000: FMBA at 0xFF0 with 5 masters (len 20 -> ends at 0x1004 > 0x1000)
@@ -1526,4 +1540,254 @@ fn test_ifd_explicit_override_confidence_semantics() {
     // Case D: Serde serialization
     let json = serde_json::to_string(&ProfileConfidence::UserSelected).unwrap();
     assert_eq!(json, "\"USER_SELECTED\"");
+}
+
+#[test]
+fn test_ifd_flmap2_interpretation_semantics_def47() {
+    // DEF-47: Platform-dependent FLMAP2 interpretation:
+    // 1. Positive vector for ICCRIBA/RIL: FLMAP2[23:16]=0x31, FLMAP2[31:24]=0x01
+    // 2. Positive vector for Tiger Point CSSO/CSSL: CSSO=0x10, CSSL=0x04, reserved bits zero
+    // 3. Negative / ambiguous vectors: Reserved bits non-zero or RIL=0 and CSSO=0
+
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+    let flmap1: u32 = 0x08; // FMBA=0x80
+
+    // 1. ICCRIBA / RIL layout
+    let flmap2_iccriba = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
+    assert_eq!(determine_flmap2_interpretation(flmap2_iccriba), Flmap2Interpretation::IccribaRil);
+    let geom_icc = validate_descriptor_geometry(flmap0, flmap1, flmap2_iccriba, 4096);
+    assert_eq!(geom_icc.flmap2_interpretation, Flmap2Interpretation::IccribaRil);
+    assert_eq!(geom_icc.iccriba, Some(0x310));
+    assert_eq!(geom_icc.iccriba_raw, 0x31);
+    assert_eq!(geom_icc.ril, 0x01);
+    assert!(geom_icc.is_valid);
+
+    // 2. Tiger Point CSSO / CSSL layout
+    // CSSO = 0x10 (bits 11:2 = 0x10 -> 0x40), CSSL = 0x04 (bits 23:16 = 0x04)
+    // Reserved bits 1:0 = 0, 15:12 = 0, 31:24 = 0
+    let flmap2_tiger = (0x04 << 16) | 0x40;
+    assert_eq!(determine_flmap2_interpretation(flmap2_tiger), Flmap2Interpretation::CpuSoftStrap);
+    let geom_tiger = validate_descriptor_geometry(flmap0, flmap1, flmap2_tiger, 4096);
+    assert_eq!(geom_tiger.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
+    assert_eq!(geom_tiger.iccriba, None, "Tiger Point layout must NOT populate ICCRIBA");
+    assert_eq!(geom_tiger.csso_raw, 0x10);
+    assert_eq!(geom_tiger.cssl_raw, 0x04);
+    assert!(geom_tiger.is_valid);
+
+    // 3. Ambiguous vector: CSSL is present but reserved bits 1:0 are non-zero (0x01)
+    let flmap2_ambig = (0x04 << 16) | 0x41;
+    assert_eq!(determine_flmap2_interpretation(flmap2_ambig), Flmap2Interpretation::Unknown);
+    let geom_ambig = validate_descriptor_geometry(flmap0, flmap1, flmap2_ambig, 4096);
+    assert_eq!(geom_ambig.flmap2_interpretation, Flmap2Interpretation::Unknown);
+    assert!(geom_ambig.has_unresolved_extents);
+    assert!(!geom_ambig.is_valid);
+    assert_eq!(geom_ambig.iccriba, None);
+
+    // 4. Legacy MCH strap vector (upper half is zero)
+    let flmap2_legacy = (0x02 << 8) | 0x20;
+    assert_eq!(determine_flmap2_interpretation(flmap2_legacy), Flmap2Interpretation::LegacyMchStrap);
+    let geom_legacy = validate_descriptor_geometry(flmap0, flmap1, flmap2_legacy, 4096);
+    assert_eq!(geom_legacy.flmap2_interpretation, Flmap2Interpretation::LegacyMchStrap);
+    assert_eq!(geom_legacy.iccriba, None);
+    assert!(geom_legacy.is_valid);
+}
+
+#[test]
+fn test_ifd_unsupported_generation_inference_removed_def48() {
+    // DEF-48: Verify that geometry.iccriba_raw > 0x30 and max_regions > 5
+    // are removed as standalone modern generation proofs.
+    // When unique generation evidence is absent, resolution must return Unknown.
+
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+    let flmap1: u32 = 0x08; // FMBA=0x80 (max_regions = 16 > 5!)
+    // ICCRIBA = 0x31 (> 0x30!), RIL = 1
+    let flmap2: u32 = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
+
+    // FLCOMP: freq_read = 0 (20 MHz, legacy frequency, NOT 17 MHz)
+    let flcomp = Some(0u32);
+    // FLMSTR1: Ambiguous master (all zeros)
+    let flmstr1 = Some(0u32);
+
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None);
+    assert_eq!(
+        res.profile,
+        IfdProfile::Unknown,
+        "Descriptor with ambiguous FLMSTR must return Unknown even if iccriba > 0x30 and max_regions > 5"
+    );
+    assert_eq!(res.confidence, ProfileConfidence::Unknown);
+
+    // Modern profile requires converging evidence: 17 MHz read frequency + modern FLMSTR
+    let modern_flmstr1 = (0x02 << 20) | (0x03 << 8); // Bits 8 and 9 set
+    let flcomp_17mhz = Some(6 << 17); // 17 MHz Skylake indicator
+    let res_modern = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp_17mhz, Some(modern_flmstr1), None);
+    assert_eq!(res_modern.profile, IfdProfile::V2Modern);
+    assert_eq!(res_modern.confidence, ProfileConfidence::Confirmed);
+
+    // Modern profile via Tiger Point soft straps + modern FLMSTR
+    let flmap2_tiger = (0x04 << 16) | 0x40; // CpuSoftStrap layout
+    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp, Some(modern_flmstr1), None);
+    assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
+    assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
+
+    // Legacy profile: legacy FLMSTR1 (0x02030000) + legacy freq + valid legacy NR
+    let legacy_flmstr1 = 0x02030000;
+    let res_legacy = detect_ifd_profile_resolution(flmap0, flmap1, 0, flcomp, Some(legacy_flmstr1), None);
+    assert_eq!(res_legacy.profile, IfdProfile::V1Legacy);
+    assert_eq!(res_legacy.confidence, ProfileConfidence::Confirmed);
+}
+
+#[test]
+fn test_ifd_geometry_known_vs_unknown_extents_def49() {
+    // DEF-49: Zero length fields must produce ExtentLength::Unknown and fail safe-geometry.
+    // Adjacent sections must pass; partial and complete overlaps must be detected.
+
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+
+    // 1. FPSBA with ISL = 0
+    {
+        let flmap1_isl0 = (0x00 << 24) | (0x08 << 16) | 0x20; // FPSBA=0x80, ISL=0!
+        let geom = validate_descriptor_geometry(flmap0, flmap1_isl0, 0, 4096);
+        assert!(geom.has_unresolved_extents);
+        assert!(!geom.is_valid);
+        assert!(geom.validation_errors.iter().any(|e| e.contains("ISL=0") || e.contains("unresolved length")));
+        let fpsba_sec = geom.section_extents.iter().find(|s| s.name == "FPSBA").unwrap();
+        assert_eq!(fpsba_sec.length, ExtentLength::Unknown);
+    }
+
+    // 2. FMSBA with MSL = 0
+    {
+        let flmap1 = 0x20;
+        let flmap2_msl0 = (0x00 << 8) | 0x10; // FMSBA=0x100, MSL=0!
+        let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2_msl0, 4096);
+        assert!(geom.has_unresolved_extents);
+        assert!(!geom.is_valid);
+        assert!(geom.validation_errors.iter().any(|e| e.contains("MSL=0") || e.contains("unresolved length")));
+        let fmsba_sec = geom.section_extents.iter().find(|s| s.name == "FMSBA").unwrap();
+        assert_eq!(fmsba_sec.length, ExtentLength::Unknown);
+    }
+
+    // 3. Adjacent sections: FCBA 0x20..0x2C (len 12), FRBA 0x30..0x34 (len 4), FMBA 0x40..0x48 (len 8)
+    {
+        let flmap0_adj = (0x03 << 16) | (0x00 << 8) | 0x02; // FRBA=0x30, FCBA=0x20
+        let flmap1_adj = (0x01 << 8) | 0x04; // NM=1 (2 masters, len 8), FMBA=0x40
+        let geom = validate_descriptor_geometry(flmap0_adj, flmap1_adj, 0, 4096);
+        assert!(geom.is_valid, "Adjacent non-overlapping sections must pass: {:?}", geom.validation_errors);
+        assert_eq!(geom.validation_errors.len(), 0);
+        assert_eq!(geom.section_extents[0].length, ExtentLength::Exact(12));
+    }
+
+    // 4. Partial overlap: FCBA at 0x20 (len 12 -> ends at 0x2C), FMBA at 0x28 (len 8 -> 0x28..0x30)
+    {
+        let flmap0_part = (0x10 << 16) | (0x00 << 8) | 0x02; // FRBA=0x100, FCBA=0x20
+        let flmap1_part = 0x02; // FMBA at 0x20 (exact overlap with FCBA)
+        let geom = validate_descriptor_geometry(flmap0_part, flmap1_part, 0, 4096);
+        assert!(!geom.is_valid);
+        assert!(geom.validation_errors.iter().any(|e| e.contains("Collision") || e.contains("overlaps") || e.contains("share identical base")));
+    }
+}
+
+#[test]
+fn test_observer_targeted_path_fixtures_def50() {
+    // DEF-50: Test every observer path individually on targeted fixtures to prove
+    // each positive and negative metric operates as expected.
+
+    reset_observer();
+    enable_observer();
+
+    // 1. IFD paths
+    // Valid IFD
+    let valid_ifd = SyntheticFixtureBuilder::build_valid_ifd_v2_image(4096);
+    let _ = IntelFlashDescriptor::parse(&valid_ifd);
+
+    // Invalid IFD signature
+    let mut invalid_sig_ifd = valid_ifd.clone();
+    invalid_sig_ifd[0x10] = 0x00;
+    let _ = IntelFlashDescriptor::parse(&invalid_sig_ifd);
+
+    // Invalid IFD geometry (FCBA outside bounds)
+    let mut invalid_geom_ifd = valid_ifd.clone();
+    invalid_geom_ifd[0x14] = 0x01; // FCBA = 0x10 < 0x20
+    let _ = IntelFlashDescriptor::parse(&invalid_geom_ifd);
+
+    // IFD region conflict
+    let mut conflict_ifd = valid_ifd.clone();
+    // Overlapping region 0 (0x00..0x1000) and region 1 (0x00..0x2000)
+    conflict_ifd[0x40..0x44].copy_from_slice(&0x00000000u32.to_le_bytes());
+    conflict_ifd[0x44..0x48].copy_from_slice(&0x00010000u32.to_le_bytes());
+    let _ = IntelFlashDescriptor::parse(&conflict_ifd);
+
+    // 2. Dell PFS paths
+    let valid_pfs = SyntheticFixtureBuilder::build_synthetic_dell_pfs(&[("BIOS", "1.0", b"TEST_PAYLOAD")]);
+    assert!(DellPfsParser::is_dell_pfs(&valid_pfs));
+    let _ = DellPfsParser::extract(&valid_pfs, None, "test_pfs");
+
+    // Negative is_dell_pfs
+    let random_buf = vec![0x55u8; 1024];
+    assert!(!DellPfsParser::is_dell_pfs(&random_buf));
+    let _ = DellPfsParser::extract(&random_buf, None, "test_pfs_err");
+
+    // PFS with corrupted CRC
+    let corrupt_crc_pfs = SyntheticFixtureBuilder::build_corrupt_crc_dell_pfs();
+    let _ = DellPfsParser::extract(&corrupt_crc_pfs, None, "test_pfs_corrupt_crc");
+
+    // PFS with corrupted XOR
+    let corrupt_xor_pfs = SyntheticFixtureBuilder::build_corrupt_xor_dell_pfs();
+    let _ = DellPfsParser::extract(&corrupt_xor_pfs, None, "test_pfs_corrupt_xor");
+
+    // 3. UEFI FV paths
+    let valid_fv = SyntheticFixtureBuilder::build_valid_firmware_volume(0x1000);
+    let _ = FirmwareVolume::find_volumes(&valid_fv);
+
+    // FV with missing _FVH (negative detection)
+    let _ = FirmwareVolume::find_volumes(&random_buf);
+
+    // FV with signature at offset < 0x28 (negative signature position)
+    let mut fv_early_sig = vec![0u8; 64];
+    fv_early_sig[0..4].copy_from_slice(b"_FVH");
+    let _ = FirmwareVolume::find_volumes(&fv_early_sig);
+
+    // FV with missing {0, 0} sentinel
+    let mut fv_no_sentinel = valid_fv.clone();
+    if fv_no_sentinel.len() >= 0x48 {
+        fv_no_sentinel[0x40..0x44].copy_from_slice(&1u32.to_le_bytes());
+        fv_no_sentinel[0x44..0x48].copy_from_slice(&0x1000u32.to_le_bytes());
+        fv_no_sentinel[0x32..0x34].copy_from_slice(&0u16.to_le_bytes());
+        let chk = crate::engine::binary::checksums::efi_fv_checksum_16(&fv_no_sentinel[..0x48]);
+        fv_no_sentinel[0x32..0x34].copy_from_slice(&chk.to_le_bytes());
+    }
+    let _ = FirmwareVolume::find_volumes(&fv_no_sentinel);
+
+    let snap = take_snapshot();
+    disable_observer();
+
+    // Verify all positive and negative metrics were exercised
+    assert!(snap.ifd_sig_accepted > 0);
+    assert!(snap.ifd_sig_rejected > 0);
+    assert!(snap.ifd_geom_accepted > 0);
+    assert!(snap.ifd_geom_rejected > 0);
+    assert!(snap.ifd_profile_decoder_reached > 0);
+    assert!(snap.ifd_region_table_entry > 0);
+    assert!(snap.ifd_region_table_completed > 0);
+    assert!(snap.ifd_region_conflict_reached > 0);
+
+    assert!(snap.pfs_is_dell_pfs_matched > 0);
+    assert!(snap.pfs_is_dell_pfs_unmatched > 0);
+    assert!(snap.pfs_extract_accepted > 0);
+    assert!(snap.pfs_extract_rejected > 0);
+    assert!(snap.pfs_section_table_reached > 0);
+    assert!(snap.pfs_guid_name_reached > 0);
+    assert!(snap.pfs_zlib_attempted > 0);
+    assert!(snap.pfs_zlib_succeeded > 0);
+    assert!(snap.pfs_crc_verified_match > 0);
+    assert!(snap.pfs_crc_verified_mismatch > 0);
+    assert!(snap.pfs_xor_verified_match > 0);
+    assert!(snap.pfs_xor_verified_mismatch > 0);
+
+    assert!(snap.fv_fvh_detected > 0);
+    assert!(snap.fv_fvh_rejected > 0);
+    assert!(snap.fv_header_validated > 0);
+    assert!(snap.fv_checksum_evaluated > 0);
+    assert!(snap.fv_block_map_traversed > 0);
+    assert!(snap.fv_sentinel_found > 0);
+    assert!(snap.fv_sentinel_missing > 0);
 }

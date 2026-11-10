@@ -41,17 +41,24 @@ impl FirmwareVolume {
         }
 
         for sig_offset in sig_offsets {
-            #[cfg(test)]
-            crate::engine::testing::observer::record_fv_fvh(true);
-
             // Header starts 0x28 bytes before the signature
             if sig_offset < 0x28 {
+                #[cfg(test)]
+                crate::engine::testing::observer::record_fv_fvh(false);
                 continue;
             }
             let hdr_offset = sig_offset - 0x28;
 
-            if let Ok(hdr) = Self::parse_at(&reader, hdr_offset) {
-                volumes.push(hdr);
+            match Self::parse_at(&reader, hdr_offset) {
+                Ok(hdr) => {
+                    #[cfg(test)]
+                    crate::engine::testing::observer::record_fv_fvh(true);
+                    volumes.push(hdr);
+                }
+                Err(_) => {
+                    #[cfg(test)]
+                    crate::engine::testing::observer::record_fv_fvh(false);
+                }
             }
         }
 
@@ -62,12 +69,16 @@ impl FirmwareVolume {
     pub fn parse_at(reader: &BinaryReader, offset: usize) -> Result<FirmwareVolumeHeader, AppError> {
         // Minimum header size is 0x38 (up to first block map)
         if offset + 0x38 > reader.len() {
+            #[cfg(test)]
+            crate::engine::testing::observer::record_fv_fvh(false);
             return Err(AppError::Binary("Offset too close to buffer end for FV header".to_string()));
         }
 
         // Verify "_FVH" signature at offset + 0x28
         let sig_bytes = reader.slice(offset + 0x28, 4)?;
         if sig_bytes != EFI_FVH_SIGNATURE {
+            #[cfg(test)]
+            crate::engine::testing::observer::record_fv_fvh(false);
             return Err(AppError::Binary(format!(
                 "Invalid FV signature at 0x{:X}", offset + 0x28
             )));

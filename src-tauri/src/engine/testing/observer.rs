@@ -1,4 +1,4 @@
-//! Test-only parser path execution observer for mutation fuzzing and regression verification (DEF-44).
+//! Test-only parser path execution observer for mutation fuzzing and regression verification (DEF-44, DEF-50).
 //!
 //! Provides deterministic, zero-overhead execution path counters recorded at the exact
 //! instruction sites inside parsers (IFD, Dell PFS, UEFI FV) without global mutable state
@@ -15,12 +15,15 @@ thread_local! {
     static IFD_GEOM_ACCEPTED: Cell<usize> = const { Cell::new(0) };
     static IFD_GEOM_REJECTED: Cell<usize> = const { Cell::new(0) };
     static IFD_PROF_DEC_REACHED: Cell<usize> = const { Cell::new(0) };
-    static IFD_REG_TBL_DECODED: Cell<usize> = const { Cell::new(0) };
+    static IFD_REG_TBL_ENTRY: Cell<usize> = const { Cell::new(0) };
+    static IFD_REG_TBL_COMPLETED: Cell<usize> = const { Cell::new(0) };
     static IFD_REG_CONFLICT_REACHED: Cell<usize> = const { Cell::new(0) };
 
-    // Dell PFS path counters
-    static PFS_CONTAINER_ACCEPTED: Cell<usize> = const { Cell::new(0) };
-    static PFS_CONTAINER_REJECTED: Cell<usize> = const { Cell::new(0) };
+    // Dell PFS path counters (DEF-50: is_dell_pfs vs extract separated)
+    static PFS_IS_DELL_PFS_MATCHED: Cell<usize> = const { Cell::new(0) };
+    static PFS_IS_DELL_PFS_UNMATCHED: Cell<usize> = const { Cell::new(0) };
+    static PFS_EXTRACT_ACCEPTED: Cell<usize> = const { Cell::new(0) };
+    static PFS_EXTRACT_REJECTED: Cell<usize> = const { Cell::new(0) };
     static PFS_SECTION_TABLE_REACHED: Cell<usize> = const { Cell::new(0) };
     static PFS_GUID_NAME_REACHED: Cell<usize> = const { Cell::new(0) };
     static PFS_ZLIB_ATTEMPTED: Cell<usize> = const { Cell::new(0) };
@@ -31,7 +34,7 @@ thread_local! {
     static PFS_XOR_VERIFIED_MATCH: Cell<usize> = const { Cell::new(0) };
     static PFS_XOR_VERIFIED_MISMATCH: Cell<usize> = const { Cell::new(0) };
 
-    // UEFI FV path counters
+    // UEFI FV path counters (DEF-50: accounts for invalid position <0x28 and candidate rejection)
     static FV_FVH_DETECTED: Cell<usize> = const { Cell::new(0) };
     static FV_FVH_REJECTED: Cell<usize> = const { Cell::new(0) };
     static FV_HEADER_VALIDATED: Cell<usize> = const { Cell::new(0) };
@@ -49,11 +52,14 @@ pub struct ParserPathSnapshot {
     pub ifd_geom_accepted: usize,
     pub ifd_geom_rejected: usize,
     pub ifd_profile_decoder_reached: usize,
-    pub ifd_region_table_decoded: usize,
+    pub ifd_region_table_entry: usize,
+    pub ifd_region_table_completed: usize,
     pub ifd_region_conflict_reached: usize,
 
-    pub pfs_container_accepted: usize,
-    pub pfs_container_rejected: usize,
+    pub pfs_is_dell_pfs_matched: usize,
+    pub pfs_is_dell_pfs_unmatched: usize,
+    pub pfs_extract_accepted: usize,
+    pub pfs_extract_rejected: usize,
     pub pfs_section_table_reached: usize,
     pub pfs_guid_name_reached: usize,
     pub pfs_zlib_attempted: usize,
@@ -71,6 +77,13 @@ pub struct ParserPathSnapshot {
     pub fv_block_map_traversed: usize,
     pub fv_sentinel_found: usize,
     pub fv_sentinel_missing: usize,
+}
+
+impl ParserPathSnapshot {
+    /// Backwards-compatibility alias for ifd_region_table_completed.
+    pub fn ifd_region_table_decoded(&self) -> usize {
+        self.ifd_region_table_completed
+    }
 }
 
 /// Reset and enable parser instrumentation on the current thread.
@@ -91,11 +104,14 @@ pub fn reset_observer() {
     IFD_GEOM_ACCEPTED.with(|c| c.set(0));
     IFD_GEOM_REJECTED.with(|c| c.set(0));
     IFD_PROF_DEC_REACHED.with(|c| c.set(0));
-    IFD_REG_TBL_DECODED.with(|c| c.set(0));
+    IFD_REG_TBL_ENTRY.with(|c| c.set(0));
+    IFD_REG_TBL_COMPLETED.with(|c| c.set(0));
     IFD_REG_CONFLICT_REACHED.with(|c| c.set(0));
 
-    PFS_CONTAINER_ACCEPTED.with(|c| c.set(0));
-    PFS_CONTAINER_REJECTED.with(|c| c.set(0));
+    PFS_IS_DELL_PFS_MATCHED.with(|c| c.set(0));
+    PFS_IS_DELL_PFS_UNMATCHED.with(|c| c.set(0));
+    PFS_EXTRACT_ACCEPTED.with(|c| c.set(0));
+    PFS_EXTRACT_REJECTED.with(|c| c.set(0));
     PFS_SECTION_TABLE_REACHED.with(|c| c.set(0));
     PFS_GUID_NAME_REACHED.with(|c| c.set(0));
     PFS_ZLIB_ATTEMPTED.with(|c| c.set(0));
@@ -123,11 +139,14 @@ pub fn take_snapshot() -> ParserPathSnapshot {
         ifd_geom_accepted: IFD_GEOM_ACCEPTED.with(|c| c.get()),
         ifd_geom_rejected: IFD_GEOM_REJECTED.with(|c| c.get()),
         ifd_profile_decoder_reached: IFD_PROF_DEC_REACHED.with(|c| c.get()),
-        ifd_region_table_decoded: IFD_REG_TBL_DECODED.with(|c| c.get()),
+        ifd_region_table_entry: IFD_REG_TBL_ENTRY.with(|c| c.get()),
+        ifd_region_table_completed: IFD_REG_TBL_COMPLETED.with(|c| c.get()),
         ifd_region_conflict_reached: IFD_REG_CONFLICT_REACHED.with(|c| c.get()),
 
-        pfs_container_accepted: PFS_CONTAINER_ACCEPTED.with(|c| c.get()),
-        pfs_container_rejected: PFS_CONTAINER_REJECTED.with(|c| c.get()),
+        pfs_is_dell_pfs_matched: PFS_IS_DELL_PFS_MATCHED.with(|c| c.get()),
+        pfs_is_dell_pfs_unmatched: PFS_IS_DELL_PFS_UNMATCHED.with(|c| c.get()),
+        pfs_extract_accepted: PFS_EXTRACT_ACCEPTED.with(|c| c.get()),
+        pfs_extract_rejected: PFS_EXTRACT_REJECTED.with(|c| c.get()),
         pfs_section_table_reached: PFS_SECTION_TABLE_REACHED.with(|c| c.get()),
         pfs_guid_name_reached: PFS_GUID_NAME_REACHED.with(|c| c.get()),
         pfs_zlib_attempted: PFS_ZLIB_ATTEMPTED.with(|c| c.get()),
@@ -179,9 +198,15 @@ pub fn record_ifd_profile_decoder() {
 }
 
 #[inline]
-pub fn record_ifd_region_table() {
+pub fn record_ifd_region_table_entry() {
     if !OBSERVER_ENABLED.with(|e| e.get()) { return; }
-    IFD_REG_TBL_DECODED.with(|c| c.set(c.get() + 1));
+    IFD_REG_TBL_ENTRY.with(|c| c.set(c.get() + 1));
+}
+
+#[inline]
+pub fn record_ifd_region_table_completed() {
+    if !OBSERVER_ENABLED.with(|e| e.get()) { return; }
+    IFD_REG_TBL_COMPLETED.with(|c| c.set(c.get() + 1));
 }
 
 #[inline]
@@ -191,12 +216,22 @@ pub fn record_ifd_region_conflict() {
 }
 
 #[inline]
-pub fn record_pfs_container(is_pfs: bool) {
+pub fn record_pfs_is_dell_pfs(matched: bool) {
     if !OBSERVER_ENABLED.with(|e| e.get()) { return; }
-    if is_pfs {
-        PFS_CONTAINER_ACCEPTED.with(|c| c.set(c.get() + 1));
+    if matched {
+        PFS_IS_DELL_PFS_MATCHED.with(|c| c.set(c.get() + 1));
     } else {
-        PFS_CONTAINER_REJECTED.with(|c| c.set(c.get() + 1));
+        PFS_IS_DELL_PFS_UNMATCHED.with(|c| c.set(c.get() + 1));
+    }
+}
+
+#[inline]
+pub fn record_pfs_extract(accepted: bool) {
+    if !OBSERVER_ENABLED.with(|e| e.get()) { return; }
+    if accepted {
+        PFS_EXTRACT_ACCEPTED.with(|c| c.set(c.get() + 1));
+    } else {
+        PFS_EXTRACT_REJECTED.with(|c| c.set(c.get() + 1));
     }
 }
 

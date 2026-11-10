@@ -85,12 +85,23 @@ impl DellPfsParser {
         let res = reader.find_subslice(DELL_PFS_SECTION_PATTERN, 0, None).is_some()
             || reader.find_subslice(PFS_HDR_TAG, 0, None).is_some();
         #[cfg(test)]
-        crate::engine::testing::observer::record_pfs_container(res);
+        crate::engine::testing::observer::record_pfs_is_dell_pfs(res);
         res
     }
 
     /// Extract all components from a Dell PFS package and write them to output_dir if specified.
     pub fn extract(
+        data: &[u8],
+        output_dir: Option<&Path>,
+        source_name: &str,
+    ) -> Result<DellPfsExtractionReport, AppError> {
+        let res = Self::extract_inner(data, output_dir, source_name);
+        #[cfg(test)]
+        crate::engine::testing::observer::record_pfs_extract(res.is_ok());
+        res
+    }
+
+    fn extract_inner(
         data: &[u8],
         output_dir: Option<&Path>,
         source_name: &str,
@@ -120,8 +131,6 @@ impl DellPfsParser {
         // Also check if the buffer is directly a raw decompressed PFS volume (starts with PFS.HDR.)
         if section_offsets.is_empty() {
             if let Some(hdr_offset) = reader.find_subslice(PFS_HDR_TAG, 0, Some(0x1000)) {
-                #[cfg(test)]
-                crate::engine::testing::observer::record_pfs_container(true);
                 let raw_pfs_slice = &data[hdr_offset..];
                 Self::parse_inner_pfs(
                     raw_pfs_slice,
@@ -135,16 +144,10 @@ impl DellPfsParser {
                 return Ok(report);
             }
 
-            #[cfg(test)]
-            crate::engine::testing::observer::record_pfs_container(false);
-
             return Err(AppError::Binary(
                 "No Dell PFS section markers or PFS.HDR. volume tags found".to_string(),
             ));
         }
-
-        #[cfg(test)]
-        crate::engine::testing::observer::record_pfs_container(true);
 
         report.total_sections_found = section_offsets.len();
         #[cfg(test)]

@@ -113,8 +113,8 @@ impl SyntheticFixtureBuilder {
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
 
         // 4. FLMAP2 at 0x1C:
-        // FMSBA = 0x20 (0x200), MSL = 0x02, ICCRIBA = 0x31 (100-series Sunrise Point marker)
-        let flmap2: u32 = (0x31 << 16) | (0x02 << 8) | 0x20;
+        // FMSBA = 0x20 (0x200), MSL = 0x02, ICCRIBA = 0x31, RIL = 0x01 (100-series Sunrise Point marker, DEF-47, DEF-49)
+        let flmap2: u32 = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
         data[0x1C..0x20].copy_from_slice(&flmap2.to_le_bytes());
 
         // 5. FCBA at 0xA0: FLCOMP register (v2 4-bit densities)
