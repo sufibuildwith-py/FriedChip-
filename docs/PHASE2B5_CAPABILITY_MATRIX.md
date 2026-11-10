@@ -23,10 +23,10 @@
 | 11 | **UEFI Block Map Sentinel Validation** | `edk2/BaseTools` | `PiFirmwareVolume.h:EFI_FV_BLOCK_MAP_ENTRY` | `engine::uefi::firmware_volume` | Native Rust Clean-Room | Implemented & Verified |
 | 12 | **UEFI FFS File Traversal & GUID Table** | `UEFITool`, `fiano/utk` | `UEFITool/ffsparser.cpp`, `fiano/pkg/uefi/ffs.go` | `engine::uefi::ffs` (Planned) | Native Rust Clean-Room | Candidate for Phase 3 |
 | 13 | **UEFI Section Decompression (Tiano/LZMA)** | `UEFITool`, `edk2/BaseTools` | `UEFITool/decompress.cpp`, `BaseTools/Source/C/LzmaCompress` | `engine::uefi::compression` (Planned) | Rust Crate (`lzma-rs`, `flate2`) | Candidate for Phase 3 |
-| 14 | **UEFI IFR Form Extraction & Decode** | `IFRExtractor-RS` | `src/ifrextractor.rs`, `src/hpk.rs` | `engine::uefi::ifr` (Planned) | Direct Library (`IFRExtractor-RS`) | Top Candidate Phase 3 |
-| 15 | **UEFI NVRAM Variable Storage Parsing** | `uefisettings` | `src/nvram.rs`, `src/variable.rs` | `engine::uefi::nvram` (Planned) | Direct Library (`uefisettings`) | Top Candidate Phase 3 |
-| 16 | **Intel ME Partition Table Analysis** | `MEAnalyzer` | `MEA.py:parse_fpt()` | `engine::intel::me` (Planned) | External Adapter (Subprocess) | Top Candidate Phase 3 |
-| 17 | **AMD PSP Directory Table Parsing** | `PSPTool` | `psptool/entry.py`, `psptool/directory.py` | `engine::amd::psp` (Planned) | External Adapter (Subprocess) | Candidate for Phase 3 |
+| 14 | **UEFI IFR Form Extraction & Decode** | `IFRExtractor-RS` | `src/main.rs`, `src/framework_parser.rs`, `src/uefi_parser.rs` | `engine::uefi::ifr` (Planned) | External Adapter (Subprocess CLI) | Top Candidate Phase 3 |
+| 15 | **UEFI NVRAM Variable Storage Parsing** | `uefisettings` | `src/nvram.rs`, `src/variable.rs` | `engine::uefi::nvram` (Deferred) | Deferred / Reclassified (Runtime Tool) | Deferred (Requires Offline NVAR/VSS Parser) |
+| 16 | **Intel ME Partition Table Analysis** | `MEAnalyzer` | `MEA.py:parse_fpt()` | `engine::intel::me` (Planned) | External Adapter (Subprocess JSON Wrapper) | Top Candidate Phase 3 |
+| 17 | **AMD PSP Directory Table Parsing** | `PSPTool` | `psptool/entry.py`, `psptool/directory.py` | `engine::amd::psp` (Planned) | External Adapter (Subprocess JSON Wrapper) | Top Candidate Phase 3 |
 
 ---
 
@@ -37,6 +37,8 @@
   - Capability 6 (Dell PFS Update Container Extraction & Verification)
   - Capabilities 9, 10, 11 (UEFI Firmware Volume Header Detection, Checksum, Sentinel Verification)
 - **Phase 3 Candidates (Recommended for Next Milestone):**
-  - Capability 14: UEFI IFR Opcode / Form Extraction via `IFRExtractor-RS` (Library)
-  - Capability 15: UEFI NVRAM Setting Parsing via `uefisettings` (Library)
-  - Capability 16: Intel ME Partition Analysis via `MEAnalyzer` (External Adapter)
+  - Capability 16: Intel ME Partition Analysis via `MEAnalyzer` (External Adapter with JSON wrapper)
+  - Capability 17: AMD PSP Directory Table Parsing via `PSPTool` (External Adapter with JSON wrapper)
+  - Capability 14: UEFI IFR Opcode / Form Extraction via `IFRExtractor-RS` (Executable Subprocess CLI Adapter)
+- **Deferred / Reclassified:**
+  - Capability 15: UEFI NVRAM Parsing via `uefisettings` (Host runtime tool; deferred until offline SPI NVAR/VSS binary store parser is scoped)

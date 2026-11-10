@@ -113,8 +113,9 @@ impl SyntheticFixtureBuilder {
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
 
         // 4. FLMAP2 at 0x1C:
-        // FMSBA = 0x20 (0x200), MSL = 0x02, ICCRIBA = 0x31, RIL = 0x01 (100-series Sunrise Point marker, DEF-47, DEF-49)
-        let flmap2: u32 = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
+        // Tiger Point / 500-series modern CPU soft strap layout (DEF-47, DEF-57):
+        // CSSO = 0x10 (bits 11:2 = 0x10 -> 0x40), CSSL = 0x04 (bits 23:16 = 0x04)
+        let flmap2: u32 = (0x04 << 16) | 0x40;
         data[0x1C..0x20].copy_from_slice(&flmap2.to_le_bytes());
 
         // 5. FCBA at 0xA0: FLCOMP register (v2 4-bit densities)

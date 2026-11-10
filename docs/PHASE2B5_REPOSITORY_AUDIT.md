@@ -148,21 +148,21 @@ Every evaluated upstream project is classified into exactly one product integrat
 
 ### 15. `IFRExtractor-RS`
 - **Commit:** `b1b9b36c00` (main)
-- **Language / Build:** Pure Rust (10 files)
+- **Language / Build:** Rust 2015 Edition (10 files; dependencies: `nom = 4.2.3`, `sha256 = 1.6.0`; executable `src/main.rs`, `src/framework_parser.rs`, `src/uefi_parser.rs`; no `src/lib.rs`; zero unit tests)
 - **License:** BSD-2-Clause (Permissive)
 - **Primary Capabilities:** Extraction and decoding of UEFI Internal Form Representation (IFR) bytecode from Setup / HII modules.
-- **Architectural Assessment:** Written in pure, modern Rust. Extremely fast, lightweight, and memory-safe.
-- **Classification:** `INTEGRATE_AS_LIBRARY`
-- **Rationale:** Top candidate for direct library integration in Phase 3. Permissive license, pure Rust, exposes hidden BIOS menu strings and configuration forms without sub-process overhead.
+- **Architectural Assessment:** Standalone CLI binary tool. It lacks a library API (`src/lib.rs`), has zero unit tests, and relies on the legacy `nom 4.2.3` parser combinator crate under the 2015 edition.
+- **Classification:** `INTEGRATE_AS_EXTERNAL_ADAPTER`
+- **Rationale:** Because it is packaged strictly as a standalone CLI executable rather than a library crate, it cannot be imported directly into Cargo dependencies. It can be invoked as an isolated subprocess CLI adapter or independently re-implemented in clean-room Rust using modern parser combinators.
 
 ### 16. `MEAnalyzer`
 - **Commit:** `d27ccdba0a` (master)
 - **Language / Build:** Python (7 files)
-- **License:** BSD-2-Clause (Permissive)
+- **License:** BSD-2-Clause (Permissive, Plato Mavropoulos)
 - **Primary Capabilities:** Intel Management Engine (ME/TXE/SPS) firmware analysis, partition detection, version hashing, Huffman dictionary decompression.
-- **Architectural Assessment:** Authoritative repository of Intel ME partition tables (FPT) and versions.
+- **Architectural Assessment:** Authoritative repository of Intel ME partition tables (FPT) and versions. Outputs formatted human-readable terminal text to stdout.
 - **Classification:** `INTEGRATE_AS_EXTERNAL_ADAPTER`
-- **Rationale:** Provides unmatched depth for Intel ME partition interpretation. Because it is Python-based with a large database, running it via the external adapter runner is ideal.
+- **Rationale:** Provides unmatched depth for Intel ME partition interpretation. Because its native interface (`MEA.py`) outputs terminal ASCII text rather than structured data, integration requires an adapter wrapper script to bridge CLI output to FriedChip+'s JSON protocol.
 
 ### 17. `me_cleaner`
 - **Commit:** `41eba87c85` (master)
@@ -184,12 +184,12 @@ Every evaluated upstream project is classified into exactly one product integrat
 
 ### 19. `PSPTool`
 - **Commit:** `5055403889` (master)
-- **Language / Build:** Python (39 files)
+- **Language / Build:** Python (39 files, Christian Werling, `PSPReverse`)
 - **License:** GPL-3.0
-- **Primary Capabilities:** AMD Platform Security Processor (PSP) / Platform Management Unit (PMU) firmware table extraction.
+- **Primary Capabilities:** AMD Platform Security Processor (PSP) / Platform Management Unit (PMU) firmware table extraction (directory structures, entry types, cryptographic digests).
 - **Architectural Assessment:** The premier open-source tool for AMD firmware structures (directory tables, entry types, cryptographic signatures).
 - **Classification:** `INTEGRATE_AS_EXTERNAL_ADAPTER`
-- **Rationale:** Provides complete AMD platform support matching Intel ME coverage. Should be wrapped as an isolated external adapter in future phases.
+- **Rationale:** Elevated to Top Candidate for Phase 3 alongside MEAnalyzer. Provides complete AMD platform support matching Intel ME coverage. Should be wrapped as an isolated external adapter with JSON output in future phases.
 
 ### 20. `UEFI-Editor`
 - **Commit:** `44e8c9ba4a` (master)
@@ -213,10 +213,10 @@ Every evaluated upstream project is classified into exactly one product integrat
 - **Commit:** `3af9ff3c95` (main)
 - **Language / Build:** Pure Rust (109 files)
 - **License:** BSD-3-Clause (Permissive)
-- **Primary Capabilities:** Parsing and modifying UEFI NVRAM settings and variables in Rust.
-- **Architectural Assessment:** Modern, idiomatic Rust code with strong unit test coverage.
-- **Classification:** `INTEGRATE_AS_LIBRARY`
-- **Rationale:** Permissive license, pure Rust, clean abstractions. Ideal library candidate for UEFI NVRAM variable parsing.
+- **Primary Capabilities:** Linux kernel and UEFI Shell runtime inspection of EFI variables (`efivarfs` via `/sys/firmware/efi/efivars`) and HiiDB.
+- **Architectural Assessment:** Host runtime tool requiring live Linux kernel filesystems or active UEFI boot services (`GetVariable`). Does not parse raw offline SPI flash NVRAM binary stores (NVAR/VSS) on Windows hosts.
+- **Classification:** `RESEARCH_ONLY`
+- **Rationale:** Because it is designed for live system querying rather than offline binary firmware image inspection, it is deferred and reclassified as research reference only.
 
 ### 23. `UEFITool` (new_engine)
 - **Commit:** `de73942df9` (new_engine)
@@ -238,12 +238,12 @@ Every evaluated upstream project is classified into exactly one product integrat
 
 ### 25. `Universal-IFR-Extractor`
 - **Commit:** `8f55681108` (master)
-- **Language / Build:** C++ (13 files)
+- **Language / Build:** C++ (13 files, Donovan Cudney)
 - **License:** GPL-3.0
 - **Primary Capabilities:** UEFI IFR opcode extraction.
-- **Architectural Assessment:** Older C++ implementation superseded by `IFRExtractor-RS`.
+- **Architectural Assessment:** Original C++ implementation by Donovan Cudney.
 - **Classification:** `RESEARCH_ONLY`
-- **Rationale:** Superseded by the pure Rust `IFRExtractor-RS` which has a permissive BSD-2-Clause license.
+- **Rationale:** Excellent research reference for IFR bytecode opcode dictionaries.
 
 ---
 
@@ -251,10 +251,10 @@ Every evaluated upstream project is classified into exactly one product integrat
 
 | Classification | Count | Repositories |
 |----------------|-------|--------------|
-| **`INTEGRATE_AS_LIBRARY`** | 2 | `IFRExtractor-RS`, `uefisettings` |
-| **`INTEGRATE_AS_EXTERNAL_ADAPTER`** | 3 | `fwhunt-scan`, `MEAnalyzer`, `PSPTool` |
+| **`INTEGRATE_AS_LIBRARY`** | 0 | None (Phase 2 core remains clean-room native Rust) |
+| **`INTEGRATE_AS_EXTERNAL_ADAPTER`** | 4 | `fwhunt-scan`, `IFRExtractor-RS`, `MEAnalyzer`, `PSPTool` |
 | **`REFERENCE_IMPLEMENTATION`** | 6 | `binwalk`, `chipsec`, `edk2`, `fiano`, `flashrom`, `UEFITool` |
 | **`REFERENCE_TEST_ORACLE`** | 3 | `BIOSUtilities`, `coreboot`, `uefi-firmware-parser` |
-| **`RESEARCH_ONLY`** | 9 | `biosforge`, `bios_extract`, `efiSeek`, `efiXplorer`, `EMBA`, `fwupd`, `me_cleaner`, `unblob`, `Universal-IFR-Extractor` |
+| **`RESEARCH_ONLY`** | 10 | `biosforge`, `bios_extract`, `efiSeek`, `efiXplorer`, `EMBA`, `fwupd`, `me_cleaner`, `uefisettings`, `unblob`, `Universal-IFR-Extractor` |
 | **`REJECT_FOR_PRODUCT`** | 2 | `ofrak`, `UEFI-Editor` |
 | **Total** | **25** | |

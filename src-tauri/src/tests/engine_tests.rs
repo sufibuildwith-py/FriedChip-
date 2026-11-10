@@ -1620,8 +1620,8 @@ fn test_ifd_unsupported_generation_inference_removed_def48() {
     let modern_flmstr1 = (0x02 << 20) | (0x03 << 8); // Bits 8 and 9 set
     let flcomp_17mhz = Some(6 << 17); // 17 MHz Skylake indicator
     let res_modern = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp_17mhz, Some(modern_flmstr1), None);
-    assert_eq!(res_modern.profile, IfdProfile::V2Modern);
-    assert_eq!(res_modern.confidence, ProfileConfidence::Probable, "DEF-53: frequency 6 repurposed on later platforms; must be Probable, not Confirmed");
+    assert_eq!(res_modern.profile, IfdProfile::Unknown, "DEF-57: frequency 6 repurposed on later platforms; insufficient for automatic V2 selection");
+    assert_eq!(res_modern.confidence, ProfileConfidence::Unknown);
 
     // Modern profile via Tiger Point soft straps + modern FLMSTR
     let flmap2_tiger = (0x04 << 16) | 0x40; // CpuSoftStrap layout
@@ -1891,7 +1891,7 @@ fn test_ifd_flmap2_interpretation_edge_cases_def52() {
 }
 
 #[test]
-fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53() {
+fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57() {
     let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
     let flmap1: u32 = 0x08; // FMBA=0x80
     let flmap2_icc: u32 = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
@@ -1899,28 +1899,44 @@ fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53() {
     let modern_flmstr1 = (0x02 << 20) | (0x03 << 8); // Modern layout (Host CPU reads desc bit 8, BIOS bit 9)
     let flcomp_17mhz = Some(6u32 << 17); // Read frequency 6 (17 MHz)
 
-    // 1. Modern FLMSTR + freq 6 yields Probable, NOT Confirmed (DEF-53)
+    // 1. Modern FLMSTR + freq 6 alone without hardware layout returns Unknown (DEF-57)
     let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), None);
-    assert_eq!(res.profile, IfdProfile::V2Modern);
-    assert_eq!(res.confidence, ProfileConfidence::Probable, "Frequency 6 is repurposed across generations; must be Probable, not Confirmed");
+    assert_eq!(res.profile, IfdProfile::Unknown, "DEF-57: Frequency 6 is repurposed on Cannon Point+ and insufficient for automatic V2 selection");
+    assert_eq!(res.confidence, ProfileConfidence::Unknown);
 
-    // 2. Conflicting indicators: legacy frequency (20 MHz) + modern FLMSTR yields Unknown
+    // 2. Proving ambiguous automatic profile cannot influence profile-specific decoding (DEF-57)
+    assert_eq!(decode_flreg_with_profile(0x007F0010, res.profile), None, "Unknown profile must prevent speculative FLREG decoding");
+    let rule = decode_master_rule_with_profile(1, "CPU", modern_flmstr1, res.profile);
+    assert_eq!(rule.read_mask, None, "Unknown profile must prevent speculative master read mask decoding");
+    assert_eq!(rule.write_mask, None, "Unknown profile must prevent speculative master write mask decoding");
+
+    // 3. User override enables profile-specific decoding with UserSelected confidence (DEF-57)
+    let res_override = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), Some(IfdProfile::V2Modern));
+    assert_eq!(res_override.profile, IfdProfile::V2Modern);
+    assert_eq!(res_override.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(decode_flreg_with_profile(0x007F0010, res_override.profile), Some((0x10000, 0x7FFFF, true)));
+    let rule_override = decode_master_rule_with_profile(1, "CPU", modern_flmstr1, res_override.profile);
+    assert!(rule_override.read_mask.is_some());
+    assert!(rule_override.write_mask.is_some());
+
+    // 4. Conflicting indicators: legacy frequency (20 MHz) + modern FLMSTR yields Unknown
     let flcomp_legacy = Some(0u32); // 20 MHz
     let res_conflict = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_legacy, Some(modern_flmstr1), None);
     assert_eq!(res_conflict.profile, IfdProfile::Unknown);
     assert_eq!(res_conflict.confidence, ProfileConfidence::Unknown);
 
-    // 3. Frequency 6 alone with legacy FLMSTR yields Unknown
+    // 5. Frequency 6 alone with legacy FLMSTR yields Unknown
     let legacy_flmstr1 = 0x02030000u32;
     let res_freq6_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(legacy_flmstr1), None);
     assert_eq!(res_freq6_legacy.profile, IfdProfile::Unknown);
     assert_eq!(res_freq6_legacy.confidence, ProfileConfidence::Unknown);
 
-    // 4. Modern FLMSTR + verified Tiger Point soft straps yields Confirmed
+    // 6. Modern FLMSTR + verified Tiger Point soft straps yields Confirmed
     let flmap2_tiger = (0x04 << 16) | 0x40;
     let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp_legacy, Some(modern_flmstr1), None);
     assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
     assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
+    assert_eq!(decode_flreg_with_profile(0x007F0010, res_tiger.profile), Some((0x10000, 0x7FFFF, true)));
 }
 
 #[test]
@@ -2007,9 +2023,17 @@ fn test_dell_fixture_provenance_reconciliation_def56() {
     let canonical_size = manifest["file_size"].as_u64().expect("file_size");
     assert_eq!(canonical_size, 13662488);
 
-    // Reconciliation notes verifying DEF-56
+    // Reconciliation notes verifying DEF-56 and DEF-60
     let recon = &manifest["provenance_reconciliation_notes"];
-    assert_eq!(recon["def_reference"].as_str(), Some("DEF-56"));
+    assert!(recon["def_reference"].as_str().unwrap().contains("DEF-56"));
+    assert_eq!(
+        recon["canonical_verification_status"].as_str(),
+        Some("VERIFIED_ON_DISK: Hash and file size computed directly from authentic local fixture")
+    );
+    assert_eq!(
+        recon["alternative_verification_status"].as_str(),
+        Some("UNVERIFIED_EXTERNALLY_REFERENCED: Reported in audit log from external Dell Command | Update DUP packaging; not present or hashed on local disk")
+    );
     assert_eq!(
         recon["canonical_fixture_sha256"].as_str(),
         Some("E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B")

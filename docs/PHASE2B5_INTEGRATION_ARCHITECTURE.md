@@ -1,12 +1,29 @@
 # Phase 2B.5 — External Adapter Integration Architecture
 
 **Project:** FriedChip+  
-**Release:** Phase 2B.5  
+**Release:** Phase 2B.5 / Phase 2B.5.1  
 **Scope:** Formal Sub-Process Adapter Contract, Communication Protocol, and Isolation Architecture for External Tools.
+
+> [!IMPORTANT]
+> **DESIGN SPECIFICATION ONLY — NOT YET IMPLEMENTED IN CODEBASE**  
+> This document defines the target architectural contract and protocol specification for out-of-process tool execution in Phase 3. In strict compliance with the Phase 2 scope freeze and Phase 3 lock, **no subprocess runner, external adapter process, or child sandbox infrastructure has been implemented in the active codebase.**
 
 ---
 
-## 1. Principles of Architecture
+## 1. Status & Implementation Boundaries (DEF-61)
+
+To prevent ambiguity between architectural designs and working implementations, FriedChip+ maintains a strict status matrix across all adapter capabilities:
+
+| Architecture Layer | Current Status | Notes |
+|--------------------|----------------|-------|
+| **Designed Adapter Contract** | **SPECIFIED** | Schemas, stdin/stdout protocol, and error formats documented herein. |
+| **Implemented Process Runner** | **NOT IMPLEMENTED** | `src-tauri` contains zero `std::process::Command` adapter wrappers or process managers. |
+| **Tested Process Isolation** | **NOT IMPLEMENTED** | No sandboxing integration test suites exist in the current test tree. |
+| **Real-World Adapter Execution** | **NOT AUTHORIZED** | Phase 3 is locked; external binaries are not executed by the application. |
+
+---
+
+## 2. Principles of Architecture
 
 FriedChip+ distinguishes strictly between:
 1. **Core Native Engine:** Written in pure, memory-safe Rust inside `src-tauri/src/engine/`. Responsible for primary parsing, structural validation gates, byte-level integrity checks, database storage, and Tauri desktop UI events.
@@ -21,9 +38,9 @@ FriedChip+ distinguishes strictly between:
 
 ---
 
-## 2. Adapter Protocol Specification
+## 3. Adapter Protocol Specification
 
-### 2.1 Standard Process Invocations
+### 3.1 Standard Process Invocations
 ```text
 +-----------------------------+                   +-------------------------------+
 |                             |  stdin (JSON cmd) |                               |
@@ -35,7 +52,7 @@ FriedChip+ distinguishes strictly between:
                +--- stderr redirected to debug logger ------------+
 ```
 
-### 2.2 Input Command Schema (`stdin`)
+### 3.2 Input Command Schema (`stdin`)
 The engine sends a single UTF-8 encoded JSON object over `stdin` followed by EOF (or newline):
 ```json
 {
@@ -53,7 +70,7 @@ The engine sends a single UTF-8 encoded JSON object over `stdin` followed by EOF
 }
 ```
 
-### 2.3 Output Result Schema (`stdout`)
+### 3.3 Output Result Schema (`stdout`)
 The adapter must write a single UTF-8 encoded JSON response to `stdout`:
 ```json
 {
@@ -83,7 +100,7 @@ The adapter must write a single UTF-8 encoded JSON response to `stdout`:
 }
 ```
 
-### 2.4 Error Handling & Exit Codes
+### 3.4 Error Handling & Exit Codes
 - **Exit Code 0:** Successful execution; `status` is `"SUCCESS"` and `data` contains parsed payload.
 - **Exit Code 1:** Unrecoverable parse failure; `status` is `"PARSE_ERROR"` and `errors` contains diagnostic strings.
 - **Exit Code 2:** Schema / Protocol invalid; invalid arguments or malformed request.
@@ -91,9 +108,26 @@ The adapter must write a single UTF-8 encoded JSON response to `stdout`:
 
 ---
 
-## 3. Sandboxing & Operational Boundaries
+## 4. Sandboxing & Operational Boundaries (DEF-61 Realities)
 
+### 4.1 Subprocess Isolation Requirements
 1. **Working Directory:** Adapters execute within an isolated ephemeral temporary directory created per request (`tempfile::tempdir()`).
-2. **Network Isolation:** Adapters run without outbound network access. No remote telemetry or cloud calls are authorized.
+2. **Read-Only Data:** Source firmware files are passed as read-only paths; adapters are prohibited from in-place writes.
 3. **Environment Isolation:** Adapters inherit only an explicit, sanitized whitelist of environment variables (`PATH`, `SYSTEMROOT`, `TEMP`).
 4. **Clean-Up:** On process termination (normal or abnormal), temporary scratch directories are unlinked and destroyed immediately.
+
+### 4.2 Windows Subprocess Sandboxing Reality
+In standard Rust, calling `std::process::Command::new(...)` executes a child process that **inherits ambient token permissions, current user filesystem access rights, and full network socket access**. Standard library process spawning does NOT provide security isolation.
+
+For a true production-grade sandbox on Windows, the Phase 3 implementation must incorporate:
+1. **Windows Job Objects (`CreateJobObjectW`, `SetInformationJobObject`):**
+   - Configure `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so that child processes and any sub-children terminate deterministically when the parent handle closes.
+   - Configure memory limits (`JOB_OBJECT_LIMIT_JOB_MEMORY`) to prevent runaway allocations.
+   - Restrict active process count to 1.
+2. **Restricted Security Tokens & AppContainer:**
+   - Drop administrative and ambient privileges using `CreateRestrictedToken` or `SaferComputeTokenFromLevel`.
+   - Run child processes under Low Integrity Level (`SECURITY_MANDATORY_LOW_RID`) or AppContainer isolation where supported.
+3. **Network Isolation:**
+   - Deny network access via Windows Filtering Platform (WFP) rules or by stripping `SeNetworkLogonRight` and restricting socket creation privileges.
+4. **Filesystem DACLs:**
+   - Restrict write permissions strictly to the ephemeral temporary scratch directory, preventing child writes to parent application binaries, configuration files, or user directories.

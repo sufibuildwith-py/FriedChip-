@@ -975,12 +975,12 @@ pub fn detect_ifd_profile_resolution(
         (false, false)
     };
 
-    // Modern profile criteria (Skylake+ / Tiger Point) (DEF-41, DEF-53):
-    // Requires verified modern FLMSTR layout AND converging modern platform indicator
-    // AND must NOT match legacy layout (prevents legacy Requester ID 0x0000 from triggering modern).
-    // Note: Per DEF-53, read-frequency 6 (17 MHz) is repurposed across generations and is NOT
-    // universally unique evidence of Skylake+. Thus, frequency 6 + modern FLMSTR yields Probable,
-    // whereas verified hardware layout like Tiger Point CPU soft strap yields Confirmed.
+    // Modern profile criteria (Tiger Point / 500-series+) (DEF-41, DEF-53, DEF-57):
+    // Requires verified modern FLMSTR layout AND unambiguous hardware layout indicator
+    // (such as verified Tiger Point CPU soft strap layout) AND must NOT match legacy layout.
+    // Note: Per DEF-57, read-frequency 6 (17 MHz) + modern FLMSTR without verified hardware layout
+    // is ambiguous because frequency 6 was repurposed on Cannon Point+ and reserved pre-Skylake.
+    // Insufficient evidence must return Unknown; automatic V2 selection requires unambiguous indicators.
     let is_tiger_strap = matches!(geometry.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
 
     if is_modern_flmstr && is_tiger_strap && !is_legacy_flmstr {
@@ -995,12 +995,12 @@ pub fn detect_ifd_profile_resolution(
     }
 
     if is_modern_flmstr && is_17mhz_read && !is_legacy_flmstr {
-        indicators.push("Detected probable modern Skylake+ indicators: 17 MHz read clock with modern FLMSTR layout (repurposed on later platforms; probable confidence)".to_string());
+        indicators.push("Ambiguous modern indicators: 17 MHz read clock with modern FLMSTR layout; frequency 6 is repurposed on Cannon Point+ and insufficient for automatic V2 selection; assigned Unknown pending user profile override (DEF-57)".to_string());
         return ProfileResolution {
-            profile: IfdProfile::V2Modern,
-            confidence: ProfileConfidence::Probable,
+            profile: IfdProfile::Unknown,
+            confidence: ProfileConfidence::Unknown,
             source: ProfileSource::AutoDetected,
-            max_regions: max_regions.min(16),
+            max_regions,
             indicators,
         };
     }

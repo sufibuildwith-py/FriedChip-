@@ -90,12 +90,15 @@ test result: ok. 60 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fin
   - `validate_descriptor_geometry` guarantees that when `flmap2_interpretation == Unknown`, `fmsba = None`, `msl = 0`, `iccriba = None`, and `ril = 0`.
 - **Test Evidence:** `test_ifd_flmap2_interpretation_edge_cases_def52` passes, asserting that all-zero FLMAP2 and unknown layouts with plausible lower halves NEVER expose speculative FMSBA/MSL.
 
-### 2.2 DEF-53 — Platform Classification Must Not Overclaim
+### 2.2 DEF-53 / DEF-57 — Conservative Profile Classification
 - **Root Cause:**
   1. `test_ifd_flcomp_read_freq_6_not_standalone_v2_proof` was previously writing fast-read frequency `6 << 21` instead of read frequency `6 << 17`.
-  2. Read-frequency 6 (17 MHz on Skylake) was previously granting automatic `Confirmed` confidence for V2Modern when paired with modern FLMSTR.
-- **Fix:** Corrected bitshift to `6 << 17`. Updated `detect_ifd_profile_resolution` so that read-frequency 6 + modern FLMSTR assigns `ProfileConfidence::Probable` (due to platform repurposing on Cannon Point+), while verified hardware layouts (Tiger Point CPU soft straps) assign `Confirmed`.
-- **Test Evidence:** `test_ifd_flcomp_read_freq_6_not_standalone_v2_proof` and `test_ifd_profile_read_freq_6_with_modern_flmstr_def53` pass.
+  2. Read-frequency 6 (17 MHz on Skylake) combined with modern FLMSTR was previously treated as sufficient to automatically infer `V2Modern`. However, flashrom documentation proves frequency 6 is repurposed on later platforms (e.g. 100 MHz on Cannon Point+), making generation ambiguous without hardware strap verification.
+- **Fix (DEF-57):**
+  - Updated `detect_ifd_profile_resolution` so that automatic frequency 6 + modern FLMSTR without verified Tiger Point soft straps returns `IfdProfile::Unknown` with `ProfileConfidence::Unknown`.
+  - Prohibited profile-specific decoding (`decode_flreg_with_profile`, `decode_master_rule_with_profile`) from executing on ambiguous automatic profiles.
+  - Preserved explicit user-selected profile overrides (`Some(IfdProfile::V2Modern)` produces `ProfileConfidence::UserSelected`).
+- **Test Evidence:** `test_ifd_flcomp_read_freq_6_not_standalone_v2_proof`, `test_ifd_unsupported_generation_inference_removed_def48`, and `test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57` pass.
 
 ### 2.3 DEF-54 — Geometry Must Respect Unknown Layouts
 - **Root Cause:** Unknown FLMAP2 interpretations could produce apparently valid layout geometry without flagging unresolved extents.
@@ -107,7 +110,19 @@ test result: ok. 60 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fin
 - **Fix:** Refactored `FirmwareVolume::parse_at` into `parse_at_internal` wrapped by `parse_at`, which acts as the sole instrumentation site for candidate header outcomes. `find_volumes()` does not duplicate recording for candidates evaluated by `parse_at`.
 - **Test Evidence:** `test_uefi_fv_observer_single_site_accounting_def55` passes with 1:1 candidate to observer metric equality across all positive and negative execution paths.
 
-### 2.5 DEF-56 — Dell Fixture Provenance Reconciliation
-- **Root Cause:** Discrepancy between canonical fixture SHA-256 (`E24B8F8F...`, 13.6 MB) and reported alternate package SHA-256 (`c5bb883c...`, ~35 MB).
-- **Resolution:** Reconciled in `fixtures/manifests/dell_latitude_5x90.json`. The ~35 MB binary is the Dell Update Package (DUP) Windows 64-bit installer with GUI runtime, whereas the canonical local fixture is the raw PE SFX firmware container. Canonical fixture identity is verified and preserved without modification.
+### 2.5 DEF-56 / DEF-60 — Dell Fixture Provenance Decoupling
+- **Root Cause:** Documentation referenced two distinct binaries (~13.6 MB PE SFX vs ~35 MB DUP wrapper) without clearly separating on-disk verified evidence from external metadata.
+- **Resolution (DEF-60):** Reconciled in `fixtures/manifests/dell_latitude_5x90.json`. The canonical local fixture `Latitude_5X90_1.41.0.exe` (`E24B8F8F...`, 13.6 MB) was verified and hashed directly on disk (`VERIFIED_ON_DISK`). The ~35 MB DUP wrapper (`c5bb883c...`) is recorded as `UNVERIFIED_EXTERNALLY_REFERENCED` from vendor release logs; it is not present on disk, and dual binary verification is explicitly not claimed.
 - **Test Evidence:** `test_dell_fixture_provenance_reconciliation_def56` passes.
+
+---
+
+## 3. Phase 2B.5.1 Remediation Summary
+
+| Defect Reference | Subject | Status | Evidence |
+|------------------|---------|--------|----------|
+| **DEF-57** | Conservative Automatic Profile Selection | **RESOLVED** | Freq 6 + modern FLMSTR yields `Unknown` automatic profile; profile-specific decoders yield neutral/None; user override assigns `UserSelected`. Verified in `test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57`. |
+| **DEF-58** | Repository Identity Reconciliation | **RESOLVED** | 5 repository remotes (`biosforge`, `bios_extract`, `efiSeek`, `PSPTool`, `Universal-IFR-Extractor`) reconciled against primary upstreams in `PHASE2B5_REPOSITORY_INVENTORY.md`. |
+| **DEF-59** | Correct Integration Feasibility | **RESOLVED** | `IFRExtractor-RS` reclassified as CLI subprocess adapter (2015 edition binary, no lib.rs); `uefisettings` reclassified as host runtime tool; `PSPTool` elevated to Top Candidate alongside `MEAnalyzer`. |
+| **DEF-60** | Fixture Provenance Evidence | **RESOLVED** | Canonical on-disk fixture (`E24B8F8F...`, 13.6 MB) verified on disk; ~35 MB DUP wrapper flagged `UNVERIFIED_EXTERNALLY_REFERENCED`; no dual binary verification claimed. |
+| **DEF-61** | Integration Architecture Evidence Labels | **RESOLVED** | Specification banner added to `PHASE2B5_INTEGRATION_ARCHITECTURE.md`; designed vs implemented matrix established; Windows Job Objects/AppContainer sandboxing realities documented. |
