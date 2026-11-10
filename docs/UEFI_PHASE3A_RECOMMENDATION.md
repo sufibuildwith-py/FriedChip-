@@ -1,105 +1,107 @@
-# Phase 3A · UEFI Analysis Implementation Roadmap & Recommendation
+# Phase 3A.1 · UEFI Analysis Implementation Roadmap & Recommendation (Corrected)
 
 **Project:** FriedChip+ Clean-Room Firmware Engineering Workstation  
-**Domain:** Implementation Milestones, Dependency Sequencing & Risk Management  
-**Milestone:** Phase 3A (Upstream Component Intelligence & Architecture Design)  
+**Domain:** Implementation Milestones, Upstream Integration Sequencing & Risk Governance  
+**Milestone:** Phase 3A.1 (Architecture Correction & Reuse-First Review)  
 **Author / Engineering Lead:** Sufiyan Khan  
 **Status:** COMPLETE STRATEGIC RECOMMENDATION  
 **Scope Restriction:** Recommendation Only. Zero code changes in application source tree.
 
 ---
 
-## 1. Executive Research Synthesis
+## 1. Executive Strategy: Proven Upstream Integration
 
-Phase 3A has conducted an in-depth source code audit of 14 upstream firmware repositories (`UEFITool`, `fiano`, `uefi-firmware-parser`, `edk2`, `IFRExtractor-RS`, `BIOSUtilities`, `binwalk`, `unblob`, `ofrak`, `Universal-IFR-Extractor`, `efiSeek`, `efiXplorer`, `fwhunt-scan`, `UEFI-Editor`).
+The core directive of FriedChip+ is:
 
-### Key Strategic Findings:
-1. **Reuse vs. Reinvention:** Reimplementing low-level FFS or IFR parsers from scratch without referencing proven upstream code is a recipe for silent failure. `LongSoft/UEFITool` and `LongSoft/IFRExtractor-RS` contain over a decade of real-world hardware quirk handling. We adopt their algorithms and AST structures directly into a clean-room Rust architecture.
-2. **Licensing Protection:** We strictly reject GPL-2.0/GPL-3.0 components (`Universal-IFR-Extractor`, `BIOSUtilities`, `fwhunt-scan`) from production builds. Permissive BSD-2-Clause (`UEFITool`, `IFRExtractor-RS`), BSD-3-Clause (`fiano`), and MIT (`uefi-firmware-parser`) projects provide 100% of the needed functionality without legal risk.
-3. **Memory Safety & Windows Simplicity:** Direct cgo/FFI linking of Go or C++ engines into Tauri is rejected due to Windows SEH conflicts and memory corruption risks. The core pipeline must be native Rust, complemented by an isolated `UEFIExtract` CLI subprocess adapter for bulk decomposition and differential testing.
-4. **Permanent IFD Freeze:** The Intel Flash Descriptor subsystem remains permanently frozen. The UEFI analysis pipeline sits on top of the IFD BIOS region output without modifying any descriptor decoding logic.
+**Integrate proven components; do not recreate an entire firmware-analysis ecosystem.**
+
+Instead of spending months implementing a native Rust parser that would inevitably struggle with edge cases and vendor quirks, FriedChip+ adopts a **Multi-Engine Upstream Integration Strategy**:
+- `LongSoft/UEFITool` (`UEFIExtract` CLI) is our **primary extraction and parsing engine**. It embodies over a decade of production battle-testing across thousands of hardware platforms.
+- `linuxboot/fiano` (`utk table --json`) is our **independent structured validation engine**.
+- `LongSoft/IFRExtractor-RS` is our **primary IFR setup disassembler**.
+- FriedChip+ focuses entirely on its core product value: hardened process orchestration, Windows Job Object security containment, unified NFOM normalization, cryptographic provenance, and rich UI exploration.
 
 ---
 
-## 2. Phased Implementation Roadmap (Phase 3B)
-
-To maintain disciplined engineering velocity and Karpathy simplicity guidelines, Phase 3B is broken down into five focused, verifiable milestones:
+## 2. Revised Implementation Roadmap (Phase 3B)
 
 ```text
-Phase 3B.1: Firmware Volume Traversal & Invariant Validation
-  │   └── Header validation, 16-bit word checksum, block maps, alignment, FV discovery
+Phase 3B.1: Upstream Subprocess Orchestration & Initial NFOM Ingestion
+  │   └── Job Object containment, UEFIExtract CLI adapter, report/dump normalization into NFOM
   ▼
-Phase 3B.2: Firmware File System (FFS) Traversal
-  │   └── FFSv2 / FFSv3 extended sizes, file states, GUID resolution, alignment padding
+Phase 3B.2: Differential Cross-Engine Validation Pipeline
+  │   └── fiano utk integration, live differential comparator, volume count & GUID parity
   ▼
-Phase 3B.3: Section Traversal & Decompression Engine
-  │   └── Standard & extended sections, Tiano/EFI decompression, LZMA integration, bomb limits
+Phase 3B.3: Bulk Section Extraction & Decompression Artifact Management
+  │   └── Atomic disk extraction, path traversal sanitization, lazy SHA-256 artifact catalog
   ▼
-Phase 3B.4: PE32 / TE Executable Inspection & IFR Setup Analysis
-  │   └── Non-executing PE/TE metadata, IFR opcode disassembly, VarStore offset mapping
+Phase 3B.4: IFR Setup Disassembly & Read-Only Variable Store Mapping
+  │   └── IFRExtractor-RS adapter, setup question AST, relative VarOffset display (read-only)
   ▼
-Phase 3B.5: Normalized Object Model & Workstation UI Integration
-      └── Complete tree explorer in React 19, diagnostic warnings, atomic file extraction
+Phase 3B.5: Workstation UI Virtualization & Diagnostic Visualization
+      └── React 19 virtualized tree explorer, structural anomaly badges, safe payload export
 ```
 
 ---
 
-## 3. First Implementation Assignment Proposal: Phase 3B.1
+## 3. Recommended First Implementation Milestone: Phase 3B.1
 
-### Title: Phase 3B.1 — Firmware Volume Traversal & Invariant Validation
-**Assignment Type:** Surgical Implementation & Unit Test Verification  
-**Subsystem:** `src-tauri/src/engine/uefi/firmware_volume.rs`
-
-### Objective:
-Implement a robust, clean-room native Rust Firmware Volume (FV) parser adhering to UEFI PI Specification Volume 3. It will scan the BIOS region identified by the IFD parser (or standalone binary dumps) and discover all valid Firmware Volumes.
+### Title: Phase 3B.1 — Upstream Subprocess Orchestration & Initial NFOM Ingestion
+**Assignment Type:** Upstream Component Integration & Normalization  
+**Scope:** `src-tauri/src/engine/uefi/` (subprocess adapter, Job Object runner, and NFOM mapper).
 
 ### Specific Scope of Phase 3B.1:
-1. **Parse `EFI_FIRMWARE_VOLUME_HEADER`:**
-   - Signature validation: `_FVH` (`0x4856465F`) at offset `+0x28`.
-   - FileSystemGuid identification (FFSv2: `8C8CE578-...`, FFSv3: `54737666-...`).
-   - Declared `FvLength` and `HeaderLength`.
-   - 16-bit inverted word checksum verification across `HeaderLength`.
-2. **Block Map Interpretation:**
-   - Parse `{ NumBlocks: u32, BlockLength: u32 }` until the `{ 0, 0 }` sentinel.
-   - Assert invariant: $\sum (\text{NumBlocks} \times \text{BlockLength}) == \text{FvLength}$.
-   - Detect and reject missing sentinel or block map overrun.
-3. **Autonomous Volume Discovery:**
-   - Scan container on 4KB / 64KB alignment boundaries for valid `_FVH` signatures.
-   - Enforce physical container boundary limits.
-4. **Negative Test Suite & Synthetic Fixtures:**
-   - Add deterministic synthetic fixtures in `fixture_builder.rs` (valid FV, corrupt checksum, missing sentinel, truncated header).
-   - Add unit tests verifying exact error propagation.
+1. **Upstream Engine Selection:**
+   - Integrate `LongSoft/UEFITool` (`UEFIExtract` CLI, commit `de73942df908b9466c055e15108ac4e4c0b1688c`) as the primary extraction worker.
+2. **Real Read-Only Operation Exercised:**
+   - Invoke `UEFIExtract <image_path> report` or `dump` in a dedicated, isolated workspace directory.
+   - Exercise genuine parsing of top-level and nested Firmware Volumes and FFS files without modifying source inputs.
+3. **Normalized Ingestion (NFOM):**
+   - Parse `UEFIExtract` report and output directory structure into the `FirmwareNode` (NFOM) hierarchy using fixed-width `u64` offsets and sizes.
+   - Separate declared size, actual payload size, and alignment padding.
+   - Tag nodes with `BackendEngine` provenance (`name: "UEFIExtract"`, `commit_sha: "de73942d"`).
+4. **Differential Validation Setup:**
+   - Execute `linuxboot/fiano` (`utk table --json`, commit `162b021e54496b89b2f9028f88234b2caec70a0c`) on the same image.
+   - Verify that discovered Firmware Volume counts and byte offsets match identically between `UEFIExtract` and `utk`.
+5. **Mandatory Security Controls Before Processing Untrusted Firmware:**
+   - Enforce Windows Job Object limits on the worker process:
+     * Memory ceiling: 512 MB (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`).
+     * CPU execution timeout: 30 seconds (`TerminateJobObject` on deadline).
+     * Automatic child termination on host close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+   - Output path sanitization: Reject any extracted path attempting directory traversal (`../`).
+6. **Integration Verification Tests:**
+   - Execute differential validation tests on EDK2 OVMF and synthetic FV golden vectors.
 
-### Explicitly Excluded from Phase 3B.1 (Deferred to Later Milestones):
-- **NO** FFS file parsing or file payload extraction (Phase 3B.2).
-- **NO** Section parsing or decompression (Phase 3B.3).
-- **NO** PE32/TE or IFR analysis (Phase 3B.4).
-- **NO** GUI modifications or Tauri IPC updates (Phase 3B.5).
-- **NO** Subprocess execution or external executable calls.
-- **NO** SPI flashing, hardware drivers, or live flashing code.
+### Strictly Excluded from Phase 3B.1:
+- **NO** In-process C++ or Go FFI linking.
+- **NO** Writing a clean-room native Rust FV/FFS parser.
+- **NO** IFR setup form disassembly (Phase 3B.4).
+- **NO** NVRAM variable modification or write-back logic.
+- **NO** UI modifications in React or Tauri IPC commands (Phase 3B.5).
+- **NO** Modification of the permanently frozen IFD parser.
+- **NO** Physical SPI hardware flashing or kernel driver access.
 
 ---
 
-## 4. Open Risks & Unresolved Technical Questions
+## 4. Open Technical Risks & Mitigations
 
-1. **Non-Standard Vendor FV Formats:**
-   - *Risk:* Apple and older Phoenix/Insyde platforms occasionally format headers with non-standard alignment or omit the block map sentinel.
-   - *Mitigation:* The parser must support a relaxed diagnostic mode that flags a warning rather than panicking, falling back to declared `FvLength`.
-2. **FFSv3 64-bit Extended Length in Wild Images:**
-   - *Risk:* FFSv3 images with 64-bit lengths are rare in client PCs but common in multi-socket enterprise server firmware.
-   - *Mitigation:* Unit tests must validate arithmetic boundary checks using synthetic 64-bit headers.
-3. **Subprocess Companion Packaging on Windows:**
-   - *Risk:* Bundling `UEFIExtract.exe` requires cross-compilation or pre-built static binaries for Windows x64.
-   - *Mitigation:* The native Rust engine is the primary path. The companion binary is purely an optional enhancement.
+1. **Companion Binary Packaging on Windows:**
+   - *Risk:* Deploying `UEFIExtract.exe` requires reliable distribution of a statically compiled Windows x64 binary.
+   - *Mitigation:* `UEFIExtract` builds with standard MSVC `/MT` producing a 100% self-contained binary (~1.5 MB) with zero external DLL requirements.
+2. **Windows Security Hardening Complexity:**
+   - *Risk:* Windows Job Objects require direct Win32 API calls (`winapi` / `windows-sys` crate).
+   - *Mitigation:* Encapsulate Job Object logic into a clean, dedicated runner module (`subprocess::job_runner`).
+3. **Discrepancies in Upstream Volume Offset Reporting:**
+   - *Risk:* Different upstream tools may report volume offsets relative to the BIOS region vs relative to the container root.
+   - *Mitigation:* The NFOM normalization layer explicitly stores both `container_offset: u64` and `relative_offset: u64`.
 
 ---
 
 ## 5. Strict Project Boundaries
 
 - **Intel Flash Descriptor (IFD) Permanently Frozen:** Zero modifications to `src-tauri/src/engine/binary/ifd.rs`.
-- **Phase 3 Hardware Flashing Strictly Locked:** No hardware SPI programmer code, no FTDI/CH341 drivers, no live kernel drivers, and no PFAT decryption.
-
-**Phase 3A is complete. We recommend proceeding to Phase 3B.1 upon authorization.**
+- **Phase 3 Hardware Flashing Strictly Locked:** Physical SPI programmer hardware, FTDI drivers, and live flashing code remain strictly locked.
+- **Documentation Integrity:** All upstream projects receive full BSD/MIT attribution in compliance with repository licenses.
 
 ---
 EOF
