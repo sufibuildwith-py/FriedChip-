@@ -1049,7 +1049,33 @@ pub fn detect_ifd_profile_resolution(
     }
 }
 
-/// Backwards-compatible profile detector returning just `IfdProfile`.
+/// Context-aware profile detector returning `IfdProfile` (DEF-65).
+///
+/// Receives the full descriptor context, including `flumap1` (Upper Map 1 at offset `0x0EFC`),
+/// which contains `MDTBA` required to authenticate modern IFD v2 platforms (e.g. Tiger Point / 500-Series).
+pub fn detect_ifd_profile_with_context(
+    flmap0: u32,
+    flmap1: u32,
+    flmap2: u32,
+    flcomp: Option<u32>,
+    flmstr1: Option<u32>,
+    flumap1: Option<u32>,
+) -> IfdProfile {
+    detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, flumap1, None).profile
+}
+
+/// Deprecated context-free profile detector returning `IfdProfile` (DEF-65).
+///
+/// **API Contract Notice**: Because this function does not receive descriptor context (`flumap1`),
+/// it CANNOT automatically confirm modern profiles (e.g. Tiger Point / V2Modern) and will
+/// return `IfdProfile::Unknown` for any image requiring modern descriptor context.
+///
+/// Use `detect_ifd_profile_with_context` or `detect_ifd_profile_resolution` for complete,
+/// evidence-backed profile classification.
+#[deprecated(
+    since = "0.2.0",
+    note = "Context-free profile detector cannot confirm modern profiles without FLUMAP1 descriptor context (DEF-65). Use detect_ifd_profile_with_context or detect_ifd_profile_resolution."
+)]
 pub fn detect_ifd_profile(
     flmap0: u32,
     flmap1: u32,

@@ -3,10 +3,12 @@ use tempfile::tempdir;
 
 use crate::db::Database;
 use crate::engine::binary::checksums::sha256_hex;
+#[allow(deprecated)]
 use crate::engine::binary::ifd::{
     decode_flcomp, decode_flcomp_with_profile, decode_flreg, decode_flreg_with_profile,
     decode_master_rule, decode_master_rule_with_profile, decode_spi_frequency,
-    determine_flmap2_interpretation, detect_ifd_profile_resolution, validate_descriptor_geometry,
+    determine_flmap2_interpretation, detect_ifd_profile, detect_ifd_profile_with_context,
+    detect_ifd_profile_resolution, validate_descriptor_geometry,
     ExtentLength, Flmap2Interpretation, IfdProfile, IntelFlashDescriptor, ProfileConfidence,
     ProfileSource, ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus, SpiFrequency,
     IFD_SIGNATURE_MAGIC,
@@ -2230,4 +2232,146 @@ fn test_ifd_user_override_produces_user_selected_def62() {
     assert_eq!(res_v1.profile, IfdProfile::V1Legacy);
     assert_eq!(res_v1.confidence, ProfileConfidence::UserSelected);
     assert_eq!(res_v1.source, ProfileSource::UserOverride);
+}
+
+#[test]
+fn test_ifd_context_aware_api_confirms_tiger_point_fixture_def65() {
+    // DEF-65: Context-aware detector confirms Tiger Point when given full descriptor context (FLUMAP1 with MDTBA != 0)
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2); // CSSL=0x11, CSSO=0x68
+    let flcomp: Option<u32> = Some(0x05 | (0x0F << 4) | (6 << 17) | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27));
+    let modern_flmstr1: u32 = (0x02 << 20) | (0x03 << 8);
+    let flumap1_tiger: Option<u32> = Some((0x02 << 24) | (0x04 << 8) | 0x30); // MDTBA = 0x02
+
+    let profile = detect_ifd_profile_with_context(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        flcomp,
+        Some(modern_flmstr1),
+        flumap1_tiger,
+    );
+    assert_eq!(profile, IfdProfile::V2Modern);
+}
+
+#[test]
+fn test_ifd_context_aware_api_missing_flumap1_returns_unknown_def65() {
+    // DEF-65: Missing or zero-MDTBA FLUMAP1 returns Unknown
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2);
+    let flcomp: Option<u32> = Some(0x05 | (0x0F << 4) | (6 << 17) | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27));
+    let modern_flmstr1: u32 = (0x02 << 20) | (0x03 << 8);
+
+    // Case A: None
+    let profile_none = detect_ifd_profile_with_context(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        flcomp,
+        Some(modern_flmstr1),
+        None,
+    );
+    assert_eq!(profile_none, IfdProfile::Unknown);
+
+    // Case B: MDTBA == 0
+    let profile_zero_mdtba = detect_ifd_profile_with_context(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        flcomp,
+        Some(modern_flmstr1),
+        Some(0x00000430),
+    );
+    assert_eq!(profile_zero_mdtba, IfdProfile::Unknown);
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_ifd_context_free_compatibility_api_does_not_falsely_confirm_modern_def65() {
+    // DEF-65: Legacy context-free detector cannot receive FLUMAP1, and therefore must never falsely confirm V2Modern
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2);
+    let flcomp: Option<u32> = Some(0x05 | (0x0F << 4) | (6 << 17) | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27));
+    let modern_flmstr1: u32 = (0x02 << 20) | (0x03 << 8);
+
+    let profile = detect_ifd_profile(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        flcomp,
+        Some(modern_flmstr1),
+    );
+    assert_eq!(profile, IfdProfile::Unknown);
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_ifd_legacy_profile_behavior_correct_where_evidence_available_def65() {
+    // DEF-65: Legacy profile behavior remains correct where required evidence is available
+    let flmap0: u32 = (0x04 << 24) | (0x04 << 16) | (0x00 << 8) | 0x08; // FCBA=0x80, FRBA=0x40, NR=4 (5 regions)
+    let flmap1: u32 = (0x02 << 24) | (0x10 << 16) | (0x02 << 8) | 0x06; // FMBA=0x60, FISBA=0x100, ISL=2
+    let flmap2_legacy: u32 = 0; // Legacy doesn't use FLMAP2 soft straps
+    let flcomp_legacy: Option<u32> = Some(0x05 | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27)); // freq_read = 0 (20 MHz legacy)
+    let legacy_flmstr1: u32 = (0x17 << 16) | (0x02 << 24); // RD: Desc(16), BIOS(17); WR: BIOS(25)
+
+    let profile_ctx = detect_ifd_profile_with_context(
+        flmap0,
+        flmap1,
+        flmap2_legacy,
+        flcomp_legacy,
+        Some(legacy_flmstr1),
+        None,
+    );
+    assert_eq!(profile_ctx, IfdProfile::V1Legacy);
+
+    let profile_compat = detect_ifd_profile(
+        flmap0,
+        flmap1,
+        flmap2_legacy,
+        flcomp_legacy,
+        Some(legacy_flmstr1),
+    );
+    assert_eq!(profile_compat, IfdProfile::V1Legacy);
+}
+
+#[test]
+fn test_ifd_user_selected_overrides_retain_confidence_def65() {
+    // DEF-65: User-selected overrides retain ProfileConfidence::UserSelected
+    let flmap0: u32 = (0x04 << 24) | (0x08 << 16) | 0x02;
+    let flmap1: u32 = (0x02 << 24) | (0x18 << 16) | (0x03 << 8) | 0x10;
+
+    let res_v2 = detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::V2Modern));
+    assert_eq!(res_v2.profile, IfdProfile::V2Modern);
+    assert_eq!(res_v2.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(res_v2.source, ProfileSource::UserOverride);
+
+    let res_v1 = detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::V1Legacy));
+    assert_eq!(res_v1.profile, IfdProfile::V1Legacy);
+    assert_eq!(res_v1.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(res_v1.source, ProfileSource::UserOverride);
+
+    let res_unknown = detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::Unknown));
+    assert_eq!(res_unknown.profile, IfdProfile::Unknown);
+    assert_eq!(res_unknown.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(res_unknown.source, ProfileSource::UserOverride);
+}
+
+#[test]
+fn test_ifd_production_parser_uses_descriptor_context_no_silent_fallback_def65() {
+    // DEF-65: Production parser IntelFlashDescriptor::parse uses FLUMAP1 from the image and never falls back to context-free heuristic
+    let valid_image = SyntheticFixtureBuilder::build_valid_ifd_v2_image(0x1000000);
+    let report = IntelFlashDescriptor::parse(&valid_image).expect("Valid IFD v2 should parse");
+    assert_eq!(report.profile, IfdProfile::V2Modern);
+    assert_eq!(report.gate2_platform.confidence, ProfileConfidence::Confirmed);
+
+    // Corrupt FLUMAP1 at 0x0EFC (clear MDTBA)
+    let mut modified_image = valid_image.clone();
+    modified_image[0x0EFC..0x0F00].copy_from_slice(&0u32.to_le_bytes());
+    let modified_report = IntelFlashDescriptor::parse(&modified_image).expect("Should parse with Unknown profile");
+    assert_eq!(modified_report.profile, IfdProfile::Unknown);
+    assert_eq!(modified_report.gate2_platform.confidence, ProfileConfidence::Unknown);
+    assert!(modified_report.gate2_platform.compatibility_notes.iter().any(|n| n.contains("Incomplete or unverified CPU soft strap layout")));
 }
