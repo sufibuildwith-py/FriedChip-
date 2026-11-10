@@ -126,3 +126,127 @@ test result: ok. 60 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fin
 | **DEF-59** | Correct Integration Feasibility | **RESOLVED** | `IFRExtractor-RS` reclassified as CLI subprocess adapter (2015 edition binary, no lib.rs); `uefisettings` reclassified as host runtime tool; `PSPTool` elevated to Top Candidate alongside `MEAnalyzer`. |
 | **DEF-60** | Fixture Provenance Evidence | **RESOLVED** | Canonical on-disk fixture (`E24B8F8F...`, 13.6 MB) verified on disk; ~35 MB DUP wrapper flagged `UNVERIFIED_EXTERNALLY_REFERENCED`; no dual binary verification claimed. |
 | **DEF-61** | Integration Architecture Evidence Labels | **RESOLVED** | Specification banner added to `PHASE2B5_INTEGRATION_ARCHITECTURE.md`; designed vs implemented matrix established; Windows Job Objects/AppContainer sandboxing realities documented. |
+
+---
+
+## 4. IFD Profile Confidence Taxonomy (DEF-62)
+
+To ensure consistent, evidence-backed platform identification, FriedChip+ defines four explicit confidence levels for `ProfileConfidence`:
+
+1. **`Confirmed`:**
+   - **Definition:** The platform profile is conclusively proven by converging, unambiguous hardware indicators matching authoritative upstream source implementations (e.g. `flashrom/ich_descriptors.c` at commit `35c679c7ec`).
+   - **Criteria for `V2Modern`:** Authentic Tiger Point CPU soft strap identification pair (`CSSL == 0x11`, `CSSO == 0x68`, `FLMAP2 = 0x001101A0`), confirmed `FLUMAP1` descriptor context with non-zero `MDTBA` (MIP Descriptor Table Base Address, e.g. `0x02000430`), and modern FLMSTR bitfields (`rd_desc` at bit 8, `rd_bios` at bit 9) with zero legacy FLMSTR match.
+   - **Criteria for `V1Legacy`:** Valid legacy `NR` (0..4, designating 1..5 regions), legacy SPI read frequency (20, 25, 33, or 50 MHz), legacy FLMSTR layout (`rd_desc` at bit 16, `rd_bios` at bit 17, reserved bits strictly zero), and valid legacy MCH straps (`FMSBA` non-zero, upper half 0).
+   - **Decoding Behavior:** Profile-specific decoding (`decode_flreg_with_profile`, `decode_master_rule_with_profile`) is fully enabled.
+
+2. **`Probable`:**
+   - **Definition:** Heuristic or partial binary indicators suggest a particular platform generation, but cross-platform repurposing or generation overlap introduces ambiguity.
+   - **Policy:** In accordance with the FriedChip+ conservative classification protocol, ambiguous heuristic indicators (such as frequency 6 without hardware soft straps, or CPU soft straps without upper map MDTBA context) **MUST NOT** proceed with speculative decoding under a `Probable` label. They are downgraded to `Unknown`.
+
+3. **`UserSelected`:**
+   - **Definition:** The profile was explicitly provided by the caller or analyst (`profile_override: Some(IfdProfile::...)`).
+   - **Decoding Behavior:** Enables profile-specific decoding according to the caller's explicit instructions. The confidence level is explicitly recorded as `UserSelected` (never automatic `Confirmed`) to record that the classification relies on human or harness assertion rather than autonomous hardware proof.
+
+4. **`Unknown`:**
+   - **Definition:** Binary evidence is incomplete, conflicting, unverified, or unrecognized.
+   - **Decoding Behavior:** Profile-specific decoding is strictly disabled. `decode_flreg_with_profile` returns `None` (preserving safe physical region bounding without speculative register interpretation). `decode_master_rule_with_profile` returns empty/neutral read and write masks.
+
+---
+
+## 5. Phase 2B.5.2 Corrective Engineering Verification (DEF-62, DEF-63, DEF-64)
+
+### 5.1 DEF-62: Tiger Point Profile Identification Verification
+- **Old Synthetic Value Rejected:** Synthetically constructed `FLMAP2 = 0x00040040` (CSSL=4, CSSO=0x10) does not match upstream flashrom rules. Tested in `test_ifd_old_synthetic_0x00040040_cannot_confirm_tiger_point_def62`, returning `IfdProfile::Unknown` with `ProfileConfidence::Unknown`.
+- **Missing Descriptor Context Rejected:** CSSL=0x11 and CSSO=0x68 without `FLUMAP1` or with `MDTBA == 0` returns `Unknown`. Tested in `test_ifd_tiger_point_missing_descriptor_context_returns_unknown_def62`.
+- **Conflicting Indicators Rejected:** Conflicting legacy FLMSTR combined with modern straps yields `Unknown`. Tested in `test_ifd_tiger_point_conflicting_evidence_returns_unknown_def62`.
+- **Authentic Tiger Point Confirmed:** Populated with upstream values (`FLMAP2 = 0x001101A0`, `FLUMAP1 = 0x02000430`, modern FLMSTR) evaluates cleanly to `V2Modern` / `Confirmed`. Tested in `test_ifd_tiger_point_fully_evidenced_confirmed_def62` and `test_ifd_v2_valid_image_parsing_and_profile_detection`.
+
+### 5.2 DEF-63: Dell Fixture Provenance & Size Discrepancy Reconciliation
+- **Clerical Error Resolved:** The value `13,637,736` bytes in Phase 2B.5.1 documentation was verified as a report typo. Actual on-disk binary `fixtures/realworld/Latitude_5X90_1.41.0.exe` is `13,662,488` bytes, exactly matching the manifest.
+- **Verification Decoupled:**
+  - `test_dell_fixture_manifest_metadata_consistency_def63` asserts JSON manifest structure and external DUP reference status.
+  - `test_dell_fixture_binary_provenance_verification_def63` performs direct byte-level filesystem inspection of the local fixture, asserting size `13,662,488`, asserting `actual_size != 13,637,736`, and asserting SHA-256 `E24B8F8F...`.
+
+### 5.3 DEF-64: Subprocess Isolation & Licensing Documentation Audit
+- **Fault Boundary vs Sandbox:** Documentation in `PHASE2B5_INTEGRATION_ARCHITECTURE.md` and `PHASE2B5_NEXT_CAPABILITIES.md` updated to separate fault containment from OS sandboxing.
+- **Windows Sandboxing Reality:** Job Objects, AppContainer, and DACLs documented as future requirements (`NOT_IMPLEMENTED`).
+- **Legal Compliance:** Removed claims that IPC process boundaries guarantee GPL separation. Marked `PSPTool` (GPL-3.0) and other candidates as `LEGAL_REVIEW_REQUIRED`.
+
+---
+
+## 6. Complete Test Suite Execution Results (Phase 2B.5.2)
+
+```text
+running 69 tests
+test tests::engine_tests::test_dell_pfs_differential_regression_against_biosutilities ... ignored, Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/
+test tests::engine_tests::test_flreg_decoding_15bit_addressing ... ok
+test tests::engine_tests::test_ifd_conservative_profile_classification_rejects_ambiguous ... ok
+test tests::engine_tests::test_dell_fixture_manifest_metadata_consistency_def63 ... ok
+test tests::engine_tests::test_ifd_explicit_override_confidence_semantics ... ok
+test tests::engine_tests::test_ifd_flcomp_known_raw_register_values ... ok
+test tests::engine_tests::test_ifd_corrupt_signature_rejection ... ok
+test tests::engine_tests::test_ifd_flcomp_reserved_frequency_handling ... ok
+test tests::engine_tests::test_ifd_flcomp_read_freq_6_not_standalone_v2_proof ... ok
+test tests::engine_tests::test_ifd_flmap0_nr_reserved_bit27_isolation ... ok
+test tests::engine_tests::test_ifd_flmap2_iccriba_accounting_and_safe_boundaries ... ok
+test tests::engine_tests::test_ifd_flmap2_interpretation_semantics_def47 ... ok
+test tests::engine_tests::test_ifd_flmap2_missing_read_error_propagation ... ok
+test tests::engine_tests::test_ifd_flmap2_interpretation_edge_cases_def52 ... ok
+test tests::engine_tests::test_ifd_boundary_collision_detection ... ok
+test tests::engine_tests::test_ifd_flmstr_known_raw_register_values ... ok
+test tests::engine_tests::test_ifd_flmstr_older_layout_cannot_accidentally_trigger_modern ... ok
+test tests::engine_tests::test_ifd_frba_out_of_bounds_handling ... ok
+test tests::engine_tests::test_ifd_flreg_profile_aware_decoding_and_boundary_checks ... ok
+test tests::engine_tests::test_ifd_geometry_known_vs_unknown_extents_def49 ... ok
+test tests::engine_tests::test_ifd_geometry_adversarial_collision_checks ... ok
+test tests::engine_tests::test_ifd_geometry_unknown_flmap2_safe_bounds_def54 ... ok
+test tests::engine_tests::test_ifd_geometry_validation_detects_collisions_and_out_of_bounds ... ok
+test tests::engine_tests::test_dell_pfs_truncated_zlib_stream ... ok
+test tests::engine_tests::test_ifd_golden_vector_regression_against_coreboot_ifdtool ... ok
+test tests::engine_tests::test_ifd_old_synthetic_0x00040040_cannot_confirm_tiger_point_def62 ... ok
+test tests::engine_tests::test_dell_pfs_corrupt_xor_detection ... ok
+test tests::engine_tests::test_dell_pfs_corrupted_inverted_crc32 ... ok
+test tests::engine_tests::test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57 ... ok
+test tests::engine_tests::test_ifd_tiger_point_conflicting_evidence_returns_unknown_def62 ... ok
+test tests::engine_tests::test_ifd_out_of_bounds_detection ... ok
+test tests::engine_tests::test_ifd_tiger_point_fully_evidenced_confirmed_def62 ... ok
+test tests::engine_tests::test_ifd_tiger_point_missing_descriptor_context_returns_unknown_def62 ... ok
+test tests::engine_tests::test_ifd_truncated_under_4kb_rejection ... ok
+test tests::engine_tests::test_ifd_unknown_profile_blocks_speculative_decoding_def62 ... ok
+test tests::engine_tests::test_ifd_unknown_profile_safe_fallback_no_speculative_decoding ... ok
+test tests::engine_tests::test_ifd_unsupported_generation_inference_removed_def48 ... ok
+test tests::engine_tests::test_ifd_user_override_produces_user_selected_def62 ... ok
+test tests::engine_tests::test_ifd_v1_5_quarantine_prevents_automatic_and_speculative_decoding ... ok
+test tests::engine_tests::test_real_world_dell_latitude_5x90_if_available ... ignored, Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/
+test tests::engine_tests::test_observer_targeted_path_fixtures_def50 ... ok
+test tests::engine_tests::test_uefi_firmware_volume_header_parsing ... ok
+test tests::engine_tests::test_uefi_fv_block_map_sentinel_missing ... ok
+test tests::engine_tests::test_real_world_fixture_hash_mismatch_panics - should panic ... ok
+test tests::engine_tests::test_uefi_fv_corrupt_signature_rejection ... ok
+test tests::engine_tests::test_uefi_fv_invalid_checksum_rejection ... ok
+test tests::engine_tests::test_uefi_fv_misaligned_volume ... ok
+test tests::engine_tests::test_uefi_fv_truncated_header ... ok
+test tests::engine_tests::test_uefi_fv_observer_single_site_accounting_def55 ... ok
+test tests::test_database_migrations_idempotency ... ok
+test tests::test_file_import_and_metadata_persistence ... ok
+test tests::engine_tests::test_synthetic_dell_pfs_extraction_end_to_end ... ok
+test tests::test_output_collision_and_atomic_overwrite_rejection ... ok
+test tests::test_sha256_correctness ... ok
+test tests::test_fresh_database_initialization ... ok
+test tests::test_source_deletion_or_relocation_detected ... ok
+test tests::test_source_file_preservation ... ok
+test tests::engine_tests::test_firmware_artifact_persistence_roundtrip ... ok
+test tests::test_source_modification_detected_after_import ... ok
+test tests::test_unknown_file_identification_not_inferred_from_extension ... ok
+test tests::test_duplicate_import_after_application_restart ... ok
+test tests::test_persistent_workspace_recovery ... ok
+test tests::engine_tests::test_dell_fixture_binary_provenance_verification_def63 ... ok
+test tests::engine_tests::test_ifd_fcba_decoding_component_density ... ok
+test tests::engine_tests::test_ifd_gate3_programmer_indeterminate_without_hardware ... ok
+test tests::engine_tests::test_ifd_valid_image_parsing_and_gates ... ok
+test tests::engine_tests::test_ifd_v2_valid_image_parsing_and_profile_detection ... ok
+test tests::engine_tests::test_ifd_master_permissions_decoding ... ok
+test tests::engine_tests::test_in_process_bounded_parser_stress_fuzzing ... ok
+
+test result: ok. 67 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 25.74s
+```

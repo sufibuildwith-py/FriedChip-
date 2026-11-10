@@ -113,9 +113,9 @@ impl SyntheticFixtureBuilder {
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
 
         // 4. FLMAP2 at 0x1C:
-        // Tiger Point / 500-series modern CPU soft strap layout (DEF-47, DEF-57):
-        // CSSO = 0x10 (bits 11:2 = 0x10 -> 0x40), CSSL = 0x04 (bits 23:16 = 0x04)
-        let flmap2: u32 = (0x04 << 16) | 0x40;
+        // Authentic Tiger Point / 500-series CPU soft strap layout (flashrom ich_descriptors.c DEF-62):
+        // CSSO = 0x68 (bits 11:2 = 0x68 -> 0x68 << 2 = 0x01A0), CSSL = 0x11 (bits 23:16 = 0x11 -> 0x11 << 16)
+        let flmap2: u32 = (0x11 << 16) | (0x68 << 2);
         data[0x1C..0x20].copy_from_slice(&flmap2.to_le_bytes());
 
         // 5. FCBA at 0xA0: FLCOMP register (v2 4-bit densities)
@@ -159,6 +159,11 @@ impl SyntheticFixtureBuilder {
             let offset = frba + (i * 4);
             data[offset..offset + 4].copy_from_slice(&disabled_reg.to_le_bytes());
         }
+
+        // 8. FLUMAP1 at offset 0x0EFC (3836 bytes): Upper map with MDTBA (DEF-62)
+        // MDTBA = 0x02 (bits 31:24 -> 0x02 << 24), VTL = 0x04 (bits 15:8), VTBA = 0x30 (bits 7:0)
+        let flumap1: u32 = (0x02 << 24) | (0x04 << 8) | 0x30;
+        data[0x0EFC..0x0F00].copy_from_slice(&flumap1.to_le_bytes());
 
         data
     }

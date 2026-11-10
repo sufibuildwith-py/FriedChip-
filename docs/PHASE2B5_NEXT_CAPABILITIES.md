@@ -17,39 +17,51 @@ In accordance with the Mandatory Research-First Protocol, candidate capabilities
 
 ---
 
-## 2. The Next 3 Capabilities
+## 2. The Next 3 Capabilities (DESIGNED — Phase 3 Candidates)
 
 ### Capability 1: Intel Management Engine (ME) Partition Analysis
 - **Selected Component:** `MEAnalyzer`
-- **Upstream Path:** `research/third_party/MEAnalyzer` (HEAD Commit: `d27ccdba0a`)
-- **License:** BSD-2-Clause (Plato Mavropoulos)
-- **Implementation Strategy:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (JSON protocol over stdin/stdout via adapter wrapper)
+- **Repository Identity:** `https://github.com/platomav/MEAnalyzer.git`
+- **Local Path:** `research/third_party/MEAnalyzer`
+- **Pinned Commit SHA:** `d27ccdba0a4b706c4b14d84c62f275e7a9b19d5c`
+- **Verified License:** BSD-2-Clause with patent grant (Plato Mavropoulos, `LICENSE`)
+- **Integration Mechanism:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (JSON protocol over stdin/stdout via adapter wrapper script)
+- **Implementation Status:** `DESIGNED` (Adapter runner is `NOT_IMPLEMENTED` in Phase 2)
+- **Legal Review Status:** `LEGAL_REVIEW_REQUIRED` (Permissive license with patent clause; low copyleft risk, attribution required)
 - **Technical Justification:**
   - Authoritative reference tool maintained by Plato Mavropoulos for Intel ME, TXE, and SPS firmware partitions.
   - Decodes the Flash Partition Table (FPT), partition headers (FTPR, FTUP, MFS), version numbers, chipsets, and Huffman dictionaries.
   - Native CLI (`MEA.py`) outputs terminal ASCII text; an adapter wrapper will translate native output into FriedChip+'s standard JSON protocol.
-  - Out-of-process execution guarantees total memory safety, process isolation, and zero native Python dependency bloat in the Tauri core.
+  - Out-of-process execution provides a memory fault boundary preventing Python crashes from destabilizing the Tauri host process, avoiding heavy native Python runtime embedding. Full security isolation requires OS sandboxing controls (Job Objects, AppContainer) scheduled for future implementation.
 
 ### Capability 2: AMD Platform Security Processor (PSP) Table Parsing
 - **Selected Component:** `PSPTool`
-- **Upstream Path:** `research/third_party/PSPTool` (HEAD Commit: `5055403889`)
-- **License:** GPL-3.0 (Christian Werling)
-- **Implementation Strategy:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (JSON protocol over stdin/stdout via adapter wrapper)
+- **Repository Identity:** `https://github.com/PSPReverse/PSPTool.git`
+- **Local Path:** `research/third_party/PSPTool`
+- **Pinned Commit SHA:** `50554038891dff1d3c03ee7ecf7194f1c1a93176`
+- **Verified License:** GPL-3.0 (Christian Werling, `LICENSE`)
+- **Integration Mechanism:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (JSON protocol over stdin/stdout via adapter wrapper script)
+- **Implementation Status:** `DESIGNED` (Adapter runner is `NOT_IMPLEMENTED` in Phase 2)
+- **Legal Review Status:** `LEGAL_REVIEW_REQUIRED` (Strict copyleft; IPC process boundaries do not automatically establish GPL exemption; formal legal analysis required before binary redistribution)
 - **Technical Justification:**
   - The premier open-source tool for AMD firmware structures, covering Zen generations and earlier APU/CPUs.
   - Decodes AMD PSP directory structures (Directory Table 1 and 2), BIOS directories, entry types (SMU, ABL, PSP core binaries), and cryptographic public keys.
   - Elevating PSPTool establishes platform parity for AMD systems, complementing Intel IFD and ME analysis.
-  - Executing as an isolated external worker process respects GPL-3.0 process boundaries and guarantees that parsing errors cannot compromise the host application.
+  - Spawning as a separate process provides fault containment against unhandled parsing exceptions. Architectural separation is an isolation boundary but must not be treated as a legal determination of GPL compliance.
 
 ### Capability 3: UEFI IFR (Internal Form Representation) Setup Extraction
 - **Selected Component:** `IFRExtractor-RS`
-- **Upstream Path:** `research/third_party/IFRExtractor-RS` (HEAD Commit: `b1b9b36c00`)
-- **License:** BSD-2-Clause
-- **Implementation Strategy:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (Executable Subprocess CLI Adapter)
+- **Repository Identity:** `https://github.com/LongSoft/IFRExtractor-RS.git`
+- **Local Path:** `research/third_party/IFRExtractor-RS`
+- **Pinned Commit SHA:** `b1b9b36c000e1e97d1dfd9a4b373400a4ceb52bf`
+- **Verified License:** BSD-2-Clause (LongSoft, `LICENSE.md`)
+- **Integration Mechanism:** `INTEGRATE_AS_EXTERNAL_ADAPTER` (Standalone CLI Subprocess Adapter)
+- **Implementation Status:** `DESIGNED` (Adapter runner is `NOT_IMPLEMENTED` in Phase 2; clean-room Rust rewrite evaluated for Phase 3)
+- **Legal Review Status:** `LEGAL_REVIEW_REQUIRED` (Permissive BSD-2-Clause license; minimal legal complexity, copyright attribution required)
 - **Technical Justification:**
-  - Upstream is packaged as a standalone binary CLI (`src/main.rs`, edition 2015, `nom 4.2.3`), rather than an exported Cargo library crate.
+  - Upstream is packaged as a standalone binary CLI (`src/main.rs`, edition 2015, `nom 4.2.3`), rather than an exported Cargo library crate, and has zero unit tests.
   - Extracts and decodes UEFI setup forms, hidden OEM debug menus, and UEFI variable mappings from IFR/HPK bytecode inside Setup DXE modules.
-  - Executing via an external subprocess adapter (or rewriting cleanly into modern Rust) transforms FriedChip+ into a functional BIOS configuration explorer without invasive foreign code dependencies.
+  - Executing via an external subprocess adapter (or re-implementing natively using modern nom/winnow combinators) transforms FriedChip+ into a functional BIOS configuration explorer without foreign code entanglement.
 
 ---
 

@@ -408,7 +408,7 @@ fn test_ifd_flmap0_nr_reserved_bit27_isolation() {
 
     // Profile detection must not be tricked into modern profile by reserved bit 27
     let flmap1 = (0x02 << 24) | (0x10 << 16) | (0x02 << 8) | 0x06;
-    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0_with_bit27, flmap1, 0, Some(0x08900005), Some(0x02170000), None);
+    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0_with_bit27, flmap1, 0, Some(0x08900005), Some(0x02170000), None, None);
     assert_eq!(res.profile, IfdProfile::V1Legacy);
 }
 
@@ -466,11 +466,11 @@ fn test_ifd_v1_5_quarantine_prevents_automatic_and_speculative_decoding() {
     // DEF-35: V1.5 is quarantined. Automatic profile detection must never assign V1.5.
     let flmap0 = (0x04 << 24) | (0x08 << 16) | 0x02;
     let flmap1 = (0x02 << 24) | (0x18 << 16) | (0x03 << 8) | 0x10;
-    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0x08900005), Some(0x02170000), None);
+    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0x08900005), Some(0x02170000), None, None);
     assert_ne!(res.profile, IfdProfile::V1_5Intermediate);
 
     // Explicit override with V1_5Intermediate must be marked with Unknown confidence and quarantined
-    let override_res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, Some(IfdProfile::V1_5Intermediate));
+    let override_res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::V1_5Intermediate));
     assert_eq!(override_res.profile, IfdProfile::V1_5Intermediate);
     assert_eq!(override_res.confidence, ProfileConfidence::Unknown);
     assert_eq!(override_res.source, ProfileSource::UserOverride);
@@ -509,7 +509,7 @@ fn test_ifd_conservative_profile_classification_rejects_ambiguous() {
     let flmap1 = (0x02 << 8) | 0x0C;
     // FLCOMP read clock is 5 (reserved value in both V1 and V2)
     let flcomp_ambiguous = Some(5 << 17);
-    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, flcomp_ambiguous, None, None);
+    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0, flmap1, 0, flcomp_ambiguous, None, None, None);
     assert_eq!(res.profile, IfdProfile::Unknown);
     assert_eq!(res.confidence, ProfileConfidence::Unknown);
 }
@@ -1500,20 +1500,20 @@ fn test_ifd_explicit_override_confidence_semantics() {
     buf[0x80..0x84].copy_from_slice(&0x02030000u32.to_le_bytes()); // FMBA Master 1
 
     // Case A: Override V1Legacy
-    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), Some(IfdProfile::V1Legacy));
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), None, Some(IfdProfile::V1Legacy));
     assert_eq!(res.profile, IfdProfile::V1Legacy);
     assert_eq!(res.source, ProfileSource::UserOverride);
     assert_eq!(res.confidence, ProfileConfidence::UserSelected);
     assert_ne!(res.confidence, ProfileConfidence::Confirmed);
 
     // Case B: Override V2Modern
-    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), Some(IfdProfile::V2Modern));
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), None, Some(IfdProfile::V2Modern));
     assert_eq!(res.profile, IfdProfile::V2Modern);
     assert_eq!(res.source, ProfileSource::UserOverride);
     assert_eq!(res.confidence, ProfileConfidence::UserSelected);
 
     // Case C: Override V1_5Intermediate (quarantined)
-    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), Some(IfdProfile::V1_5Intermediate));
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, 0, Some(0), Some(0x02030000), None, Some(IfdProfile::V1_5Intermediate));
     assert_eq!(res.profile, IfdProfile::V1_5Intermediate);
     assert_eq!(res.source, ProfileSource::UserOverride);
     assert_eq!(res.confidence, ProfileConfidence::Unknown, "Quarantined V1.5 must return Unknown confidence");
@@ -1608,7 +1608,7 @@ fn test_ifd_unsupported_generation_inference_removed_def48() {
     // FLMSTR1: Ambiguous master (all zeros)
     let flmstr1 = Some(0u32);
 
-    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None);
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None, None);
     assert_eq!(
         res.profile,
         IfdProfile::Unknown,
@@ -1619,20 +1619,32 @@ fn test_ifd_unsupported_generation_inference_removed_def48() {
     // Modern profile requires converging evidence: 17 MHz read frequency + modern FLMSTR
     let modern_flmstr1 = (0x02 << 20) | (0x03 << 8); // Bits 8 and 9 set
     let flcomp_17mhz = Some(6 << 17); // 17 MHz Skylake indicator
-    let res_modern = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp_17mhz, Some(modern_flmstr1), None);
+    let res_modern = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp_17mhz, Some(modern_flmstr1), None, None);
     assert_eq!(res_modern.profile, IfdProfile::Unknown, "DEF-57: frequency 6 repurposed on later platforms; insufficient for automatic V2 selection");
     assert_eq!(res_modern.confidence, ProfileConfidence::Unknown);
 
-    // Modern profile via Tiger Point soft straps + modern FLMSTR
-    let flmap2_tiger = (0x04 << 16) | 0x40; // CpuSoftStrap layout
-    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp, Some(modern_flmstr1), None);
+    // Old synthetic FLMAP2 value 0x00040040 cannot confirm Tiger Point (DEF-62)
+    let flmap2_old_synthetic = (0x04 << 16) | 0x40;
+    let res_old_synth = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_old_synthetic, flcomp, Some(modern_flmstr1), Some(0x02000000), None);
+    assert_eq!(res_old_synth.profile, IfdProfile::Unknown, "DEF-62: old synthetic 0x00040040 must not confirm Tiger Point");
+    assert_eq!(res_old_synth.confidence, ProfileConfidence::Unknown);
+
+    // Authentic Tiger Point: CSSL=0x11, CSSO=0x68 per upstream flashrom + FLUMAP1 MDTBA != 0 (DEF-62)
+    let flmap2_tiger = (0x11 << 16) | (0x68 << 2);
+    let flumap1_tiger = Some(0x02000000); // MDTBA != 0
+    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp, Some(modern_flmstr1), flumap1_tiger, None);
     assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
     assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
+
+    // Missing FLUMAP1 MDTBA descriptor context yields Unknown (DEF-62)
+    let res_tiger_no_umap = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp, Some(modern_flmstr1), None, None);
+    assert_eq!(res_tiger_no_umap.profile, IfdProfile::Unknown, "DEF-62: missing FLUMAP1 MDTBA context must produce Unknown");
+    assert_eq!(res_tiger_no_umap.confidence, ProfileConfidence::Unknown);
 
     // Legacy profile: legacy FLMSTR1 (0x02030000) + legacy freq + valid legacy NR + valid legacy FLMAP2 (DEF-52)
     let legacy_flmstr1 = 0x02030000;
     let flmap2_legacy = (0x02 << 8) | 0x20; // Valid legacy MCH straps (MSL=2, FMSBA=0x20)
-    let res_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_legacy, flcomp, Some(legacy_flmstr1), None);
+    let res_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_legacy, flcomp, Some(legacy_flmstr1), None, None);
     assert_eq!(res_legacy.profile, IfdProfile::V1Legacy);
     assert_eq!(res_legacy.confidence, ProfileConfidence::Confirmed);
 }
@@ -1900,7 +1912,7 @@ fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57() {
     let flcomp_17mhz = Some(6u32 << 17); // Read frequency 6 (17 MHz)
 
     // 1. Modern FLMSTR + freq 6 alone without hardware layout returns Unknown (DEF-57)
-    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), None);
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), None, None);
     assert_eq!(res.profile, IfdProfile::Unknown, "DEF-57: Frequency 6 is repurposed on Cannon Point+ and insufficient for automatic V2 selection");
     assert_eq!(res.confidence, ProfileConfidence::Unknown);
 
@@ -1911,7 +1923,7 @@ fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57() {
     assert_eq!(rule.write_mask, None, "Unknown profile must prevent speculative master write mask decoding");
 
     // 3. User override enables profile-specific decoding with UserSelected confidence (DEF-57)
-    let res_override = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), Some(IfdProfile::V2Modern));
+    let res_override = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), None, Some(IfdProfile::V2Modern));
     assert_eq!(res_override.profile, IfdProfile::V2Modern);
     assert_eq!(res_override.confidence, ProfileConfidence::UserSelected);
     assert_eq!(decode_flreg_with_profile(0x007F0010, res_override.profile), Some((0x10000, 0x7FFFF, true)));
@@ -1921,19 +1933,20 @@ fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57() {
 
     // 4. Conflicting indicators: legacy frequency (20 MHz) + modern FLMSTR yields Unknown
     let flcomp_legacy = Some(0u32); // 20 MHz
-    let res_conflict = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_legacy, Some(modern_flmstr1), None);
+    let res_conflict = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_legacy, Some(modern_flmstr1), None, None);
     assert_eq!(res_conflict.profile, IfdProfile::Unknown);
     assert_eq!(res_conflict.confidence, ProfileConfidence::Unknown);
 
     // 5. Frequency 6 alone with legacy FLMSTR yields Unknown
     let legacy_flmstr1 = 0x02030000u32;
-    let res_freq6_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(legacy_flmstr1), None);
+    let res_freq6_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(legacy_flmstr1), None, None);
     assert_eq!(res_freq6_legacy.profile, IfdProfile::Unknown);
     assert_eq!(res_freq6_legacy.confidence, ProfileConfidence::Unknown);
 
-    // 6. Modern FLMSTR + verified Tiger Point soft straps yields Confirmed
-    let flmap2_tiger = (0x04 << 16) | 0x40;
-    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp_legacy, Some(modern_flmstr1), None);
+    // 6. Modern FLMSTR + authentic Tiger Point soft straps (CSSL=0x11, CSSO=0x68) + FLUMAP1 MDTBA yields Confirmed (DEF-62)
+    let flmap2_tiger = (0x11 << 16) | (0x68 << 2);
+    let flumap1_tiger = Some(0x02000000); // MDTBA != 0
+    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp_legacy, Some(modern_flmstr1), flumap1_tiger, None);
     assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
     assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
     assert_eq!(decode_flreg_with_profile(0x007F0010, res_tiger.profile), Some((0x10000, 0x7FFFF, true)));
@@ -2014,7 +2027,7 @@ fn test_uefi_fv_observer_single_site_accounting_def55() {
 }
 
 #[test]
-fn test_dell_fixture_provenance_reconciliation_def56() {
+fn test_dell_fixture_manifest_metadata_consistency_def63() {
     let manifest = load_dell_latitude_manifest();
 
     // Canonical fixture identification
@@ -2023,9 +2036,9 @@ fn test_dell_fixture_provenance_reconciliation_def56() {
     let canonical_size = manifest["file_size"].as_u64().expect("file_size");
     assert_eq!(canonical_size, 13662488);
 
-    // Reconciliation notes verifying DEF-56 and DEF-60
+    // Reconciliation notes verifying DEF-56, DEF-60, and DEF-63
     let recon = &manifest["provenance_reconciliation_notes"];
-    assert!(recon["def_reference"].as_str().unwrap().contains("DEF-56"));
+    assert!(recon["def_reference"].as_str().unwrap().contains("DEF-63"));
     assert_eq!(
         recon["canonical_verification_status"].as_str(),
         Some("VERIFIED_ON_DISK: Hash and file size computed directly from authentic local fixture")
@@ -2042,4 +2055,179 @@ fn test_dell_fixture_provenance_reconciliation_def56() {
         recon["alternative_reported_sha256"].as_str(),
         Some("c5bb883ca09bd8eb38c64eb3d047ec6cb66847deef94e101f3e79e6f315a6e87")
     );
+    assert_eq!(
+        recon["canonical_file_size"].as_u64(),
+        Some(13662488)
+    );
+}
+
+#[test]
+fn test_dell_fixture_binary_provenance_verification_def63() {
+    // DEF-63: Distinguish manifest metadata check from actual on-disk binary provenance.
+    let maybe_fixture_path = resolve_dell_latitude_fixture_path();
+
+    if let Some(fixture_path) = maybe_fixture_path {
+        // Binary is present on disk: verify actual file properties directly
+        assert!(fixture_path.exists(), "Resolved fixture path must exist on filesystem");
+
+        let metadata = std::fs::metadata(&fixture_path).expect("Failed to read fixture metadata");
+        let actual_size = metadata.len();
+
+        // Exact canonical size verification (13,662,488 bytes; proving the 13,637,736 report typo was false)
+        assert_eq!(
+            actual_size, 13662488,
+            "Actual on-disk binary size must match canonical 13,662,488 bytes (and not the 13,637,736 typo)"
+        );
+        assert_ne!(
+            actual_size, 13637736,
+            "Actual size must never match the 13,637,736 report clerical error"
+        );
+
+        let file_bytes = std::fs::read(&fixture_path).expect("Failed to read fixture bytes");
+        assert_eq!(file_bytes.len(), 13662488);
+
+        let actual_sha = sha256_hex(&file_bytes).to_uppercase();
+        assert_eq!(
+            actual_sha,
+            "E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B",
+            "Actual on-disk binary SHA-256 must match canonical SHA-256"
+        );
+    } else {
+        eprintln!("[SKIPPED] test_dell_fixture_binary_provenance_verification_def63: Real-world binary not present on disk; binary provenance cannot be verified from manifest alone.");
+    }
+}
+
+#[test]
+fn test_ifd_old_synthetic_0x00040040_cannot_confirm_tiger_point_def62() {
+    // DEF-62: The old synthetic value 0x00040040 (CSSL=4, CSSO=0x10) does NOT match
+    // upstream flashrom Tiger Point identification pair (CSSL=0x11, CSSO=0x68).
+    // Even when paired with modern FLMSTR and MDTBA != 0, it must return Unknown!
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_old_synthetic: u32 = (0x04 << 16) | 0x40; // 0x00040040
+    let modern_flmstr1 = (0x02 << 20) | (0x03 << 8);
+    let flumap1_valid = Some(0x02000000u32); // MDTBA = 2
+
+    let res = detect_ifd_profile_resolution(
+        flmap0,
+        flmap1,
+        flmap2_old_synthetic,
+        None,
+        Some(modern_flmstr1),
+        flumap1_valid,
+        None,
+    );
+    assert_eq!(res.profile, IfdProfile::Unknown, "Old synthetic 0x00040040 must not confirm Tiger Point");
+    assert_eq!(res.confidence, ProfileConfidence::Unknown);
+}
+
+#[test]
+fn test_ifd_tiger_point_missing_descriptor_context_returns_unknown_def62() {
+    // DEF-62: Missing upper map (FLUMAP1) or MDTBA == 0 lacks required descriptor context
+    // and must produce Unknown, even if CSSL/CSSO matches Tiger Point.
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2); // Authentic CSSL=0x11, CSSO=0x68
+    let modern_flmstr1 = (0x02 << 20) | (0x03 << 8);
+
+    // Case 1: FLUMAP1 is None
+    let res_no_umap = detect_ifd_profile_resolution(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        None,
+        Some(modern_flmstr1),
+        None,
+        None,
+    );
+    assert_eq!(res_no_umap.profile, IfdProfile::Unknown, "Missing FLUMAP1 must produce Unknown");
+    assert_eq!(res_no_umap.confidence, ProfileConfidence::Unknown);
+
+    // Case 2: FLUMAP1 has MDTBA == 0 (pre-Cannon Point upper map)
+    let res_zero_mdtba = detect_ifd_profile_resolution(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        None,
+        Some(modern_flmstr1),
+        Some(0x00000430), // MDTBA = 0
+        None,
+    );
+    assert_eq!(res_zero_mdtba.profile, IfdProfile::Unknown, "FLUMAP1 with MDTBA=0 must produce Unknown");
+    assert_eq!(res_zero_mdtba.confidence, ProfileConfidence::Unknown);
+}
+
+#[test]
+fn test_ifd_tiger_point_conflicting_evidence_returns_unknown_def62() {
+    // DEF-62: Incomplete or conflicting evidence cannot produce Confirmed.
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2);
+    let flumap1_valid = Some(0x02000000u32);
+
+    // Legacy FLMSTR combined with Tiger Point layout -> conflict -> Unknown
+    let legacy_flmstr1 = 0x02030000u32;
+    let res = detect_ifd_profile_resolution(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        None,
+        Some(legacy_flmstr1),
+        flumap1_valid,
+        None,
+    );
+    assert_eq!(res.profile, IfdProfile::Unknown, "Conflicting legacy FLMSTR with Tiger Point must yield Unknown");
+    assert_eq!(res.confidence, ProfileConfidence::Unknown);
+}
+
+#[test]
+fn test_ifd_tiger_point_fully_evidenced_confirmed_def62() {
+    // DEF-62: Authentic upstream Tiger Point pair (CSSL=0x11, CSSO=0x68) + non-zero MDTBA
+    // + modern FLMSTR produces V2Modern / Confirmed.
+    let flmap0: u32 = (0x0F << 24) | (0x04 << 16) | (0x00 << 8) | 0x0A;
+    let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+    let flmap2_tiger: u32 = (0x11 << 16) | (0x68 << 2); // 0x001101A0
+    let modern_flmstr1 = (0x02 << 20) | (0x03 << 8);
+    let flumap1_valid = Some(0x02000000u32);
+
+    let res = detect_ifd_profile_resolution(
+        flmap0,
+        flmap1,
+        flmap2_tiger,
+        None,
+        Some(modern_flmstr1),
+        flumap1_valid,
+        None,
+    );
+    assert_eq!(res.profile, IfdProfile::V2Modern);
+    assert_eq!(res.confidence, ProfileConfidence::Confirmed);
+    assert_eq!(res.source, ProfileSource::AutoDetected);
+}
+
+#[test]
+fn test_ifd_unknown_profile_blocks_speculative_decoding_def62() {
+    // DEF-62: Unknown automatic profiles do not silently enter profile-specific decoding.
+    let flreg_val = 0x007F0010u32;
+    assert_eq!(decode_flreg_with_profile(flreg_val, IfdProfile::Unknown), None);
+
+    let rule = decode_master_rule_with_profile(1, "CPU", 0x02030000, IfdProfile::Unknown);
+    assert_eq!(rule.read_mask, None);
+    assert_eq!(rule.write_mask, None);
+}
+
+#[test]
+fn test_ifd_user_override_produces_user_selected_def62() {
+    // DEF-62: Explicit user override is represented as UserSelected, never Confirmed.
+    let flmap0: u32 = (0x04 << 24) | (0x08 << 16) | 0x02;
+    let flmap1: u32 = (0x02 << 24) | (0x18 << 16) | (0x03 << 8) | 0x10;
+
+    let res_v2 = detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::V2Modern));
+    assert_eq!(res_v2.profile, IfdProfile::V2Modern);
+    assert_eq!(res_v2.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(res_v2.source, ProfileSource::UserOverride);
+
+    let res_v1 = detect_ifd_profile_resolution(flmap0, flmap1, 0, None, None, None, Some(IfdProfile::V1Legacy));
+    assert_eq!(res_v1.profile, IfdProfile::V1Legacy);
+    assert_eq!(res_v1.confidence, ProfileConfidence::UserSelected);
+    assert_eq!(res_v1.source, ProfileSource::UserOverride);
 }

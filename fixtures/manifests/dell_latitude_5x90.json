@@ -27,7 +27,7 @@
     "checksum": "Inverted CRC-32 with Section XOR Checksum"
   },
   "provenance_reconciliation_notes": {
-    "def_reference": "DEF-56 / DEF-60",
+    "def_reference": "DEF-56 / DEF-60 / DEF-63",
     "canonical_fixture_sha256": "E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B",
     "canonical_file_size": 13662488,
     "canonical_packaging_type": "Direct Dell PE SFX self-extracting firmware container for Latitude 5490/5590 System BIOS v1.41.0",
@@ -35,6 +35,7 @@
     "alternative_reported_sha256": "c5bb883ca09bd8eb38c64eb3d047ec6cb66847deef94e101f3e79e6f315a6e87",
     "alternative_reported_size_approx": "~35 MB",
     "alternative_verification_status": "UNVERIFIED_EXTERNALLY_REFERENCED: Reported in audit log from external Dell Command | Update DUP packaging; not present or hashed on local disk",
+    "size_discrepancy_reconciliation": "The value 13,637,736 bytes cited in Phase 2B.5.1 correction report was a clerical typo (difference: 24,752 bytes). The actual fixture binary on disk is 13,662,488 bytes, exactly matching this manifest and verifying against SHA-256 E24B8F8F... byte-for-byte.",
     "reconciliation_assessment": "The canonical fixture on disk is the 13.6 MB bare PE SFX update binary directly containing the PFS container. The ~35 MB hash represents an externally referenced Windows 64-bit DUP installer with bundled GUI wrapper. Binary verification is claimed strictly for the canonical binary on disk, not for the unacquired DUP package."
   }
 }

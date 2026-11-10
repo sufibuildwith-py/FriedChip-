@@ -120,3 +120,87 @@
 - **Remediation:** Implemented atomic output writers, read-only original file handles, SHA-256 tamper verification, and collision rejection.
 - **Verification Test:** `test_source_file_preservation`, `test_source_modification_detected_after_import`, `test_output_collision_and_atomic_overwrite_rejection`
 - **Status:** **RESOLVED**
+
+---
+
+## 3. Phase 2B.5.2 Corrective Engineering Ledger (DEF-62, DEF-63, DEF-64)
+
+### DEF-62: Tiger Point Profile Identification Evidence
+1. **Original Problem:** The synthetic FLMAP2 value `0x00040040` (CSSL=4, CSSO=0x10) was claimed as proof of Tiger Point identity to assign `V2Modern / Confirmed`. Upstream flashrom inspection revealed that `0x00040040` does not match the upstream identification pair, lacks required FLUMAP1 MDTBA descriptor context, and was previously falling through to a generic compatibility warning.
+2. **Root Cause:** Over-reliance on a syntactically plausible FLMAP2 pattern rather than the exact upstream chipset identification rules in `flashrom/ich_descriptors.c` (`guess_ich_chipset_from_content`).
+3. **Files Changed:**
+   - `src-tauri/src/engine/binary/ifd.rs`
+   - `src-tauri/src/engine/testing/fixture_builder.rs`
+   - `src-tauri/src/tests/engine_tests.rs`
+4. **Technical Correction:**
+   - Added `flumap1: Option<u32>` to `detect_ifd_profile_resolution`.
+   - Populated and evaluated upstream Tiger Point requirements: `CSSL == 0x11` (17) and `CSSO == 0x68` (104), corresponding to `FLMAP2 = 0x001101A0`.
+   - Required non-zero `MDTBA` from `FLUMAP1` at offset `0x0EFC` (3836 bytes).
+   - The old `0x00040040` value and any incomplete/unverified soft-strap layouts strictly return `IfdProfile::Unknown` with `ProfileConfidence::Unknown`.
+   - Updated synthetic fixture builder `build_valid_ifd_v2_image` with authentic FLMAP2 (`0x001101A0`) and FLUMAP1 (`0x02000430`).
+5. **Tests Added / Changed:**
+   - `test_ifd_old_synthetic_0x00040040_cannot_confirm_tiger_point_def62` (Added)
+   - `test_ifd_tiger_point_missing_descriptor_context_returns_unknown_def62` (Added)
+   - `test_ifd_tiger_point_conflicting_evidence_returns_unknown_def62` (Added)
+   - `test_ifd_tiger_point_fully_evidenced_confirmed_def62` (Added)
+   - `test_ifd_unknown_profile_blocks_speculative_decoding_def62` (Added)
+   - `test_ifd_user_override_produces_user_selected_def62` (Added)
+   - `test_ifd_v2_valid_image_parsing_and_profile_detection` (Updated)
+   - `test_ifd_profile_read_freq_6_with_modern_flmstr_def53_def57` (Updated)
+6. **Test Result:** All 8 tests passed cleanly.
+7. **Remaining Limitations:** Identification is specific to Tiger Point / 500-Series rules from flashrom `35c679c7ec`. Other 600/700 series rules remain in research documentation until authentic fixtures are acquired.
+8. **Evidence Status:** Upstream source verified (`flashrom/ich_descriptors.c:1087-1092`); automated test execution confirmed.
+9. **Closure Assessment:** **CLOSED**.
+
+---
+
+### DEF-63: Dell Latitude 5X90 Fixture Provenance Discrepancy
+1. **Original Problem:** Phase 2B.5.1 correction report recorded the canonical fixture size as `13,637,736` bytes, whereas the manifest records `13,662,488` bytes (discrepancy of 24,752 bytes). Test suites previously evaluated only JSON manifest strings without distinguishing actual disk binary verification.
+2. **Root Cause:** A clerical error/typo in the Phase 2B.5.1 report draft. The actual on-disk binary `fixtures/realworld/Latitude_5X90_1.41.0.exe` has always measured exactly `13,662,488` bytes with SHA-256 `E24B8F8F...`.
+3. **Files Changed:**
+   - `fixtures/manifests/dell_latitude_5x90.json`
+   - `src-tauri/src/tests/engine_tests.rs`
+4. **Technical Correction:**
+   - Verified actual file size on disk: `(Get-Item fixtures/realworld/Latitude_5X90_1.41.0.exe).Length == 13662488`.
+   - Verified actual file SHA-256: `E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B`.
+   - Reconciled manifest notes explaining the clerical typo in report documentation.
+   - Separated tests into manifest metadata consistency vs actual on-disk binary provenance verification.
+5. **Tests Added / Changed:**
+   - `test_dell_fixture_manifest_metadata_consistency_def63` (Updated)
+   - `test_dell_fixture_binary_provenance_verification_def63` (Added: direct filesystem inspection, size check, SHA-256 hash check, asserting against typo).
+6. **Test Result:** Both tests passed.
+7. **Remaining Limitations:** Alternative ~35 MB DUP package remains unacquired and is documented as `UNVERIFIED_EXTERNALLY_REFERENCED`.
+8. **Evidence Status:** Byte-level filesystem audit and hash calculation verified against disk file.
+9. **Closure Assessment:** **CLOSED**.
+
+---
+
+### DEF-64: Subprocess Isolation and Licensing Documentation
+1. **Original Problem:** Documentation in `PHASE2B5_NEXT_CAPABILITIES.md` claimed that subprocess execution "guarantees total memory safety, process isolation" and "respects GPL-3.0 process boundaries", conflating fault containment with OS sandboxing and presenting architectural separation as a legal conclusion.
+2. **Root Cause:** Imprecise phrasing in architecture summaries that overlooked OS-level child process token inheritance and FSF legal interpretations of combined works.
+3. **Files Changed:**
+   - `docs/PHASE2B5_INTEGRATION_ARCHITECTURE.md`
+   - `docs/PHASE2B5_NEXT_CAPABILITIES.md`
+4. **Technical Correction:**
+   - Differentiated Fault Boundary (process crash containment) from OS-Enforced Sandboxing (filesystem DACLs, AppContainer, Job Objects, network blocking).
+   - Documented Windows sandboxing controls as future requirements (`NOT_IMPLEMENTED`).
+   - Applied explicit status labels: `DESIGNED`, `IMPLEMENTED`, `TESTED`, `NOT_IMPLEMENTED`, `LEGAL_REVIEW_REQUIRED`.
+   - Stated clearly that IPC process boundaries do not automatically establish GPL compliance; marked `PSPTool` integration as `LEGAL_REVIEW_REQUIRED`.
+   - Added external tool licensing ledger with pinned commits and license types.
+5. **Tests Added / Changed:** Pure documentation and architectural contract correction; no code runner exists in Phase 2.
+6. **Test Result:** N/A (Documentation audit).
+7. **Remaining Limitations:** Child process isolation runner is deferred to Phase 3.
+8. **Evidence Status:** Architectural review and legal disclaimer reconciled across documentation.
+9. **Closure Assessment:** **CLOSED**.
+
+---
+
+## 4. Reconciled Test Suite Ledger
+
+| Test Category | Count | Status | Notes |
+|---------------|-------|--------|-------|
+| **Runnable Unit & Integration Tests** | 67 | **PASSED** | All 67 in-tree automated tests pass in ~25.7s. |
+| **Real-World OEM Integration Tests** | 2 | **IGNORED (Passed when executed)** | `test_real_world_dell_latitude_5x90_if_available` and `test_dell_pfs_differential_regression_against_biosutilities` require local proprietary fixture. Both execute and pass cleanly when invoked with `-- --ignored`. |
+| **Failed Tests** | 0 | **NONE** | Zero failures across all suites. |
+| **Filtered Out** | 0 | **NONE** | Zero tests filtered out during full test run. |
+| **Total Test Catalog** | 69 | **VERIFIED** | 67 passed; 0 failed; 2 ignored. |

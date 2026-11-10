@@ -6,6 +6,7 @@ use crate::error::AppError;
 
 pub const IFD_SIGNATURE_OFFSET: usize = 0x10;
 pub const IFD_SIGNATURE_MAGIC: u32 = 0x0FF0A55A;
+pub const FLUMAP1_OFFSET: usize = 0x0EFC; // 3836 bytes (IFD_SIZE - 256 - 4)
 
 /// Explicit Intel Flash Descriptor Profiles (DEF-15, DEF-27, DEF-34, DEF-35).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,7 +384,6 @@ pub fn validate_descriptor_geometry(
     }
 
     // 4. Derive maximum safe region table extent bounded by next succeeding section or FLUMAP1 (DEF-42, DEF-43)
-    const FLUMAP1_OFFSET: usize = 0x0EFC; // 3836 bytes (IFD_SIZE - 256 - 4)
     let mut succeeding_offsets = vec![FLUMAP1_OFFSET];
 
     for s in &active_sections {
@@ -862,13 +862,14 @@ pub fn decode_master_rule(
     decode_master_rule_with_profile(master_id, master_name, flmstr, profile)
 }
 
-/// Conservative, evidence-backed Intel Flash Descriptor profile detector (DEF-15, DEF-25, DEF-34, DEF-35).
+/// Conservative, evidence-backed Intel Flash Descriptor profile detector (DEF-15, DEF-25, DEF-34, DEF-35, DEF-57, DEF-62).
 pub fn detect_ifd_profile_resolution(
     flmap0: u32,
     flmap1: u32,
     flmap2: u32,
     flcomp: Option<u32>,
     flmstr1: Option<u32>,
+    flumap1: Option<u32>,
     profile_override: Option<IfdProfile>,
 ) -> ProfileResolution {
     let mut indicators = Vec::new();
@@ -975,21 +976,38 @@ pub fn detect_ifd_profile_resolution(
         (false, false)
     };
 
-    // Modern profile criteria (Tiger Point / 500-series+) (DEF-41, DEF-53, DEF-57):
-    // Requires verified modern FLMSTR layout AND unambiguous hardware layout indicator
-    // (such as verified Tiger Point CPU soft strap layout) AND must NOT match legacy layout.
-    // Note: Per DEF-57, read-frequency 6 (17 MHz) + modern FLMSTR without verified hardware layout
-    // is ambiguous because frequency 6 was repurposed on Cannon Point+ and reserved pre-Skylake.
-    // Insufficient evidence must return Unknown; automatic V2 selection requires unambiguous indicators.
-    let is_tiger_strap = matches!(geometry.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
+    // Modern profile criteria (Tiger Point / 500-series+) (DEF-41, DEF-53, DEF-57, DEF-62):
+    // Requires verified modern FLMSTR layout AND authentic Tiger Point identification pair
+    // (CSSL == 0x11, CSSO == 0x68 per upstream flashrom ich_descriptors.c) AND verified FLUMAP1
+    // descriptor context with non-zero MDTBA (MIP Descr. Table Base Addr., required by flashrom
+    // guess_ich_chipset_from_content to enter modern 300/500/600 series classification)
+    // AND must NOT match legacy layout.
+    let is_tiger_strap_format = matches!(geometry.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
+    let is_upstream_tiger_point_pair = geometry.cssl_raw == 0x11 && geometry.csso_raw == 0x68;
+    let mdtba = flumap1.map(|u| ((u >> 24) & 0xFF) as u8).unwrap_or(0);
+    let has_valid_mdtba = mdtba != 0;
 
-    if is_modern_flmstr && is_tiger_strap && !is_legacy_flmstr {
-        indicators.push("Detected modern Tiger Point indicators: verified CPU soft strap layout with modern FLMSTR".to_string());
+    if is_modern_flmstr && !is_legacy_flmstr && is_tiger_strap_format && is_upstream_tiger_point_pair && has_valid_mdtba {
+        indicators.push("Detected modern Tiger Point indicators: authentic CPU soft strap pair (CSSL=0x11, CSSO=0x68), non-zero FLUMAP1 MDTBA, and modern FLMSTR".to_string());
         return ProfileResolution {
             profile: IfdProfile::V2Modern,
             confidence: ProfileConfidence::Confirmed,
             source: ProfileSource::AutoDetected,
             max_regions: max_regions.min(16),
+            indicators,
+        };
+    }
+
+    if is_tiger_strap_format {
+        indicators.push(format!(
+            "Incomplete or unverified CPU soft strap layout (CSSL=0x{:02X}, CSSO=0x{:03X}, MDTBA=0x{:02X}): does not match upstream Tiger Point identification pair (CSSL=0x11, CSSO=0x68) with non-zero MDTBA; assigned Unknown (DEF-62)",
+            geometry.cssl_raw, geometry.csso_raw, mdtba
+        ));
+        return ProfileResolution {
+            profile: IfdProfile::Unknown,
+            confidence: ProfileConfidence::Unknown,
+            source: ProfileSource::AutoDetected,
+            max_regions,
             indicators,
         };
     }
@@ -1039,7 +1057,7 @@ pub fn detect_ifd_profile(
     flcomp: Option<u32>,
     flmstr1: Option<u32>,
 ) -> IfdProfile {
-    detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None).profile
+    detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None, None).profile
 }
 
 pub struct IntelFlashDescriptor;
@@ -1150,8 +1168,24 @@ impl IntelFlashDescriptor {
             None
         };
 
-        // 6. Resolve Profile (DEF-15, DEF-25, DEF-34, DEF-35)
-        let resolution = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, raw_flcomp, raw_flmstr1, profile_override);
+        // Read raw FLUMAP1 at offset 0x0EFC (3836 bytes) if within image bounds (DEF-62)
+        const FLUMAP1_OFFSET: usize = 0x0EFC;
+        let raw_flumap1 = if FLUMAP1_OFFSET + 4 <= image_size {
+            reader.read_u32_le(FLUMAP1_OFFSET).ok()
+        } else {
+            None
+        };
+
+        // 6. Resolve Profile (DEF-15, DEF-25, DEF-34, DEF-35, DEF-62)
+        let resolution = detect_ifd_profile_resolution(
+            flmap0,
+            flmap1,
+            flmap2,
+            raw_flcomp,
+            raw_flmstr1,
+            raw_flumap1,
+            profile_override,
+        );
         #[cfg(test)]
         crate::engine::testing::observer::record_ifd_profile_decoder();
         let profile = resolution.profile;
@@ -1232,7 +1266,6 @@ impl IntelFlashDescriptor {
         }
 
         // 9. Parse Flash Regions at FRBA (Profile-aware and geometry-bounded DEF-16, DEF-25, DEF-36, DEF-37, DEF-49)
-        const FLUMAP1_OFFSET: usize = 0x0EFC;
         let mut succeeding_offsets = vec![FLUMAP1_OFFSET];
         for s in &geometry.section_extents {
             if s.start > frba {
