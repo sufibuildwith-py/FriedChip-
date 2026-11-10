@@ -28,9 +28,19 @@ impl SyntheticFixtureBuilder {
         let flmap0: u32 = (0x04 << 16) | 0x04;
         data[0x14..0x18].copy_from_slice(&flmap0.to_le_bytes());
 
-        // 3. FLMAP1 at 0x18: NC=1 (2 components), FCBA=0x08 (byte offset 0x80)
-        let flmap1: u32 = (0x08 << 16) | 0x01;
+        // 3. FLMAP1 at 0x18: NC=0 (1 component), FCBA=0x08 (0x80), FMBA=0x06 (0x60)
+        let flmap1: u32 = (0x06 << 24) | (0x08 << 16) | 0x00;
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
+
+        // Populate FCBA (0x80): FLCOMP (Comp 1: 16MB = raw 5, Fast Read 50MHz)
+        let fcba = 0x80;
+        let flcomp: u32 = 0x05 | (1 << 13) | (4 << 14);
+        data[fcba..fcba + 4].copy_from_slice(&flcomp.to_le_bytes());
+
+        // Populate FMBA (0x60): FRAP (Host BIOS write permitted: 0x04070207)
+        let fmba = 0x60;
+        let frap: u32 = 0x04070207;
+        data[fmba..fmba + 4].copy_from_slice(&frap.to_le_bytes());
 
         // 4. Region table at FRBA (0x40)
         let frba = 0x40;
@@ -47,7 +57,8 @@ impl SyntheticFixtureBuilder {
         data[frba + 16..frba + 20].copy_from_slice(&reg4.to_le_bytes());
 
         // Fill regions with deterministic test patterns
-        for i in 0x1000..0x2000 {
+        let fill_end = total_size.min(0x2000);
+        for i in 0x1000..fill_end {
             data[i] = ((i * 13 + 0x37) & 0xFF) as u8;
         }
 
@@ -94,6 +105,13 @@ impl SyntheticFixtureBuilder {
     /// `components: &[ (friendly_name, version, payload_data) ]`
     pub fn build_synthetic_dell_pfs(
         components: &[(&str, &str, &[u8])],
+    ) -> Vec<u8> {
+        Self::build_synthetic_dell_pfs_with_options(components, false)
+    }
+
+    pub fn build_synthetic_dell_pfs_with_options(
+        components: &[(&str, &str, &[u8])],
+        corrupt_crc: bool,
     ) -> Vec<u8> {
         // 1. Build Name Info table payload
         let mut name_table_payload = Vec::new();
@@ -162,7 +180,10 @@ impl SyntheticFixtureBuilder {
         volume.extend_from_slice(&payload);
 
         // Footer: PayloadSize (u32), Inverted CRC-32 (u32), PFS.FTR. (8 bytes)
-        let inv_crc = inverted_crc32(&payload);
+        let mut inv_crc = inverted_crc32(&payload);
+        if corrupt_crc {
+            inv_crc ^= 0xFFFFFFFF;
+        }
         volume.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         volume.extend_from_slice(&inv_crc.to_le_bytes());
         volume.extend_from_slice(PFS_FTR_TAG);
@@ -230,13 +251,7 @@ impl SyntheticFixtureBuilder {
 
     /// Builds a Dell PFS image with invalid inverted CRC-32 checksum.
     pub fn build_corrupt_crc_dell_pfs() -> Vec<u8> {
-        let mut pkg = Self::build_synthetic_dell_pfs(&[("System BIOS", "1.0.0.0", b"FAKE_BIOS_PAYLOAD")]);
-        // Locate PFS.FTR. and corrupt the CRC-32 preceding it
-        if let Some(pos) = pkg.windows(PFS_FTR_TAG.len()).position(|w| w == PFS_FTR_TAG) {
-            let crc_offset = pos - 4;
-            pkg[crc_offset] ^= 0xAA;
-        }
-        pkg
+        Self::build_synthetic_dell_pfs_with_options(&[("System BIOS", "1.0.0.0", b"FAKE_BIOS_PAYLOAD")], true)
     }
 
     /// Builds a valid synthetic EFI Firmware Volume header (0x48 bytes).

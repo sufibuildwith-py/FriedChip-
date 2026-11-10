@@ -74,6 +74,37 @@ pub const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS idx_operation_logs_op ON operation_logs(operation_id);
         "#,
     },
+    Migration {
+        version: 2,
+        name: "002_firmware_artifacts",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS firmware_artifacts (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                source_file_id TEXT NOT NULL REFERENCES firmware_files(id) ON DELETE CASCADE,
+                parent_artifact_id TEXT REFERENCES firmware_artifacts(id) ON DELETE SET NULL,
+                name TEXT NOT NULL,
+                format TEXT NOT NULL,
+                source_offset INTEGER NOT NULL,
+                raw_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                md5 TEXT,
+                file_path TEXT,
+                gate1_passed INTEGER NOT NULL DEFAULT 0,
+                gate2_passed INTEGER NOT NULL DEFAULT 0,
+                gate3_passed INTEGER NOT NULL DEFAULT 0,
+                validation_notes TEXT NOT NULL DEFAULT '[]',
+                warnings TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_firmware_artifacts_workspace ON firmware_artifacts(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_firmware_artifacts_source_file ON firmware_artifacts(source_file_id);
+            CREATE INDEX IF NOT EXISTS idx_firmware_artifacts_parent ON firmware_artifacts(parent_artifact_id);
+            CREATE INDEX IF NOT EXISTS idx_firmware_artifacts_sha256 ON firmware_artifacts(sha256);
+        "#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<()> {

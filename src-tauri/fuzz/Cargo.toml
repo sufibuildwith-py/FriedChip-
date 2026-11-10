@@ -1,0 +1,32 @@
+[package]
+name = "lbe-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.lbe-desktop]
+path = ".."
+
+[[bin]]
+name = "fuzz_ifd"
+path = "fuzz_targets/fuzz_ifd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_dell_pfs"
+path = "fuzz_targets/fuzz_dell_pfs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_uefi_fv"
+path = "fuzz_targets/fuzz_uefi_fv.rs"
+test = false
+doc = false

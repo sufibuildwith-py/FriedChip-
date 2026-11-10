@@ -154,3 +154,7 @@ pub struct AppSetting {
     pub value: String,
     pub updated_at: String,
 }
+
+
+pub mod artifact;
+pub use artifact::*;

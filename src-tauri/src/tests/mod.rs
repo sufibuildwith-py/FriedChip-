@@ -69,7 +69,7 @@ fn test_database_migrations_idempotency() {
     let count: i32 = conn
         .query_row("SELECT COUNT(1) FROM schema_migrations", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, crate::db::migrations::MIGRATIONS.len() as i32);
 }
 
 #[test]

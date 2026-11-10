@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 use crate::error::{AppError, AppResult};
+use crate::models::artifact::{ArtifactFormat, FirmwareArtifact};
 use crate::models::{AppSetting, FirmwareFile, FirmwareFormat, FormatConfidence, Operation, OperationLog, OperationStatus, Workspace};
 
 #[derive(Clone)]
@@ -12,6 +13,10 @@ pub struct Database {
 }
 
 impl Database {
+    pub fn conn(&self) -> Arc<Mutex<Connection>> {
+        self.conn.clone()
+    }
+
     pub fn new_in_memory() -> AppResult<Self> {
         let mut conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -413,5 +418,89 @@ impl Database {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    // Firmware Artifacts
+    pub fn insert_artifact(&self, a: &FirmwareArtifact) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO firmware_artifacts (
+                id, workspace_id, source_file_id, parent_artifact_id, name, format,
+                source_offset, raw_size, sha256, md5, file_path,
+                gate1_passed, gate2_passed, gate3_passed, validation_notes, warnings,
+                metadata_json, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18
+            )
+            "#,
+            params![
+                a.id,
+                a.workspace_id,
+                a.source_file_id,
+                a.parent_artifact_id,
+                a.name,
+                a.format.to_string(),
+                a.source_offset as i64,
+                a.raw_size as i64,
+                a.sha256,
+                a.md5,
+                a.file_path,
+                if a.gate1_passed { 1 } else { 0 },
+                if a.gate2_passed { 1 } else { 0 },
+                if a.gate3_passed { 1 } else { 0 },
+                serde_json::to_string(&a.validation_notes).unwrap_or_else(|_| "[]".to_string()),
+                serde_json::to_string(&a.warnings).unwrap_or_else(|_| "[]".to_string()),
+                a.metadata_json,
+                a.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_artifact(&self, id: &str) -> AppResult<Option<FirmwareArtifact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                id, workspace_id, source_file_id, parent_artifact_id, name, format,
+                source_offset, raw_size, sha256, md5, file_path,
+                gate1_passed, gate2_passed, gate3_passed, validation_notes, warnings,
+                metadata_json, created_at
+            FROM firmware_artifacts
+            WHERE id = ?1
+            "#,
+        )?;
+        let mut rows = stmt.query([id])?;
+        if let Some(row) = rows.next()? {
+            let format_str: String = row.get(5)?;
+            let notes_str: String = row.get(14)?;
+            let warnings_str: String = row.get(15)?;
+            Ok(Some(FirmwareArtifact {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                source_file_id: row.get(2)?,
+                parent_artifact_id: row.get(3)?,
+                name: row.get(4)?,
+                format: format_str.parse().unwrap_or(ArtifactFormat::Unknown),
+                source_offset: row.get::<_, i64>(6)? as usize,
+                raw_size: row.get::<_, i64>(7)? as usize,
+                sha256: row.get(8)?,
+                md5: row.get(9)?,
+                file_path: row.get(10)?,
+                gate1_passed: row.get::<_, i32>(11)? == 1,
+                gate2_passed: row.get::<_, i32>(12)? == 1,
+                gate3_passed: row.get::<_, i32>(13)? == 1,
+                validation_notes: serde_json::from_str(&notes_str).unwrap_or_default(),
+                warnings: serde_json::from_str(&warnings_str).unwrap_or_default(),
+                metadata_json: row.get(16)?,
+                created_at: row.get(17)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }
