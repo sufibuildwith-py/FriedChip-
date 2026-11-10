@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build Outputs
+dist/
+dist-ssr/
+build/
+target/
+*.bundle.*
+
+# Tauri
+src-tauri/target/
+
+# Local databases and runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+storage/data/
+storage/logs/
+storage/temp/
+
+# Firmware dumps & test binaries (Do NOT commit customer / proprietary firmware dumps)
+firmware-samples/
+*.bin
+*.rom
+*.fd
+*.cap
+*.hdr
+*.exe
+*.hex
+*.dump
+
+# Logs & Environment
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.env
+.env.local
+.env.*.local
+*.log
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Third-party research clones
+research/
+scratch/
+
