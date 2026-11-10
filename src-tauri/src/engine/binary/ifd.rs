@@ -171,12 +171,14 @@ pub struct DescriptorGeometry {
     pub validation_notes: Vec<String>,
 }
 
-/// Classify the platform-dependent interpretation of FLMAP2 (DEF-47).
+/// Classify the platform-dependent interpretation of FLMAP2 (DEF-47, DEF-52).
 pub fn determine_flmap2_interpretation(flmap2: u32) -> Flmap2Interpretation {
-    let upper_half = (flmap2 >> 16) as u16;
-    if upper_half == 0 {
-        return Flmap2Interpretation::LegacyMchStrap;
+    if flmap2 == 0 {
+        return Flmap2Interpretation::Unknown;
     }
+
+    let upper_half = (flmap2 >> 16) as u16;
+    let fmsba_raw = (flmap2 & 0xFF) as u8;
 
     let ril_raw = ((flmap2 >> 24) & 0xFF) as u8;
     let iccriba_raw = ((flmap2 >> 16) & 0xFF) as u8;
@@ -185,21 +187,42 @@ pub fn determine_flmap2_interpretation(flmap2: u32) -> Flmap2Interpretation {
     let csso = ((flmap2 >> 2) & 0x03FF) as u16;
     let res2 = ((flmap2 >> 12) & 0x0F) as u8;
     let cssl = iccriba_raw;
-    let res3 = ril_raw;
 
-    let is_tiger = (res1 == 0) && (res2 == 0) && (res3 == 0) && (csso != 0) && (cssl != 0);
-    let is_iccriba_ril = (iccriba_raw != 0) && (ril_raw != 0);
-
-    if is_tiger && !is_iccriba_ril {
-        Flmap2Interpretation::CpuSoftStrap
-    } else if is_iccriba_ril && !is_tiger {
-        Flmap2Interpretation::IccribaRil
-    } else {
-        Flmap2Interpretation::Unknown
+    // 1. Legacy MCH strap definition (ICH8 through Ibex Peak):
+    // Upper half (bits [31:16]) strictly reserved 0.
+    // Lower half must define a non-zero base address (FMSBA).
+    if upper_half == 0 {
+        if fmsba_raw != 0 {
+            return Flmap2Interpretation::LegacyMchStrap;
+        } else {
+            return Flmap2Interpretation::Unknown;
+        }
     }
+
+    // 2. Tiger Point / 500-series+ CPU soft strap definition (ich_descriptors.h):
+    // Bits [31:24] (res3) MUST be strictly zero.
+    // Bits [1:0] (res1) and [15:12] (res2) MUST be strictly zero.
+    // CSSO (offset) and CSSL (length) must be non-zero.
+    if ril_raw == 0 {
+        if res1 == 0 && res2 == 0 && csso != 0 && cssl != 0 {
+            return Flmap2Interpretation::CpuSoftStrap;
+        } else {
+            return Flmap2Interpretation::Unknown;
+        }
+    }
+
+    // 3. ICCRIBA / RIL layout (Cougar Point 6-series through Cannon Point / Skylake):
+    // Bits [31:24] is RIL (Register Initialization Length) and must be non-zero (1..16).
+    // Bits [23:16] is ICCRIBA (ICC Register Initialization Base Address) and must be non-zero (0x02..0x40).
+    if ril_raw >= 1 && ril_raw <= 16 && iccriba_raw >= 0x02 && iccriba_raw <= 0x40 {
+        return Flmap2Interpretation::IccribaRil;
+    }
+
+    // All other bit patterns are unverified or ambiguous
+    Flmap2Interpretation::Unknown
 }
 
-/// Validates descriptor geometry before table traversal (DEF-37, DEF-42, DEF-43, DEF-47, DEF-49).
+/// Validates descriptor geometry before table traversal (DEF-37, DEF-42, DEF-43, DEF-47, DEF-49, DEF-52, DEF-54).
 pub fn validate_descriptor_geometry(
     flmap0: u32,
     flmap1: u32,
@@ -229,31 +252,33 @@ pub fn validate_descriptor_geometry(
     let fmsba_raw = (flmap2 & 0xFF) as u8;
     let flmap2_interpretation = determine_flmap2_interpretation(flmap2);
 
+    // DEF-52: Unknown layouts must NEVER expose speculative FMSBA or MSL as validated metadata
     let (fmsba, msl) = match flmap2_interpretation {
-        Flmap2Interpretation::CpuSoftStrap => (None, 0),
-        _ => {
+        Flmap2Interpretation::LegacyMchStrap | Flmap2Interpretation::IccribaRil => {
             let fmsba = if fmsba_raw != 0 { Some((fmsba_raw as usize) << 4) } else { None };
             let msl = ((flmap2 >> 8) & 0xFF) as u8;
             (fmsba, msl)
         }
+        Flmap2Interpretation::CpuSoftStrap | Flmap2Interpretation::Unknown => (None, 0),
     };
 
     let iccriba_raw = ((flmap2 >> 16) & 0xFF) as u8;
-    let ril = ((flmap2 >> 24) & 0xFF) as u8;
+    let ril_raw = ((flmap2 >> 24) & 0xFF) as u8;
     let csso_raw = ((flmap2 >> 2) & 0x03FF) as u16;
     let cssl_raw = iccriba_raw;
 
-    let iccriba = match flmap2_interpretation {
+    // DEF-52: Unknown or CpuSoftStrap layouts must NEVER expose speculative ICCRIBA or RIL
+    let (iccriba, ril) = match flmap2_interpretation {
         Flmap2Interpretation::IccribaRil => {
             let addr = (iccriba_raw as usize) << 4;
             if (0x20..0x1000).contains(&addr) {
-                Some(addr)
+                (Some(addr), ril_raw)
             } else {
                 errors.push(format!("ICCRIBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", addr));
-                None
+                (None, 0)
             }
         }
-        _ => None,
+        _ => (None, 0),
     };
 
     let mut has_unresolved_extents = false;
@@ -325,12 +350,14 @@ pub fn validate_descriptor_geometry(
         add_active_section("ICCRIBA", i, len, &mut errors, &mut has_unresolved_extents);
     }
 
-    if (flmap2 >> 16) != 0 && flmap2_interpretation == Flmap2Interpretation::Unknown {
+    if flmap2 != 0 && flmap2_interpretation == Flmap2Interpretation::Unknown {
         has_unresolved_extents = true;
         errors.push(format!(
-            "FLMAP2 upper bits (0x{:04X}) cannot be resolved to a verified layout; safe geometry cannot be verified",
-            (flmap2 >> 16) as u16
+            "FLMAP2 layout (0x{:08X}) is unknown or unverified; safe layout-dependent geometry cannot be verified",
+            flmap2
         ));
+    } else if flmap2 == 0 {
+        notes.push("FLMAP2 is all-zero (no strap or ICC sections defined; layout unassigned)".to_string());
     }
 
     // 3. Pairwise interval collision check between every active section pair (DEF-43, DEF-49)
@@ -948,20 +975,30 @@ pub fn detect_ifd_profile_resolution(
         (false, false)
     };
 
-    // Modern profile criteria (Skylake+):
+    // Modern profile criteria (Skylake+ / Tiger Point) (DEF-41, DEF-53):
     // Requires verified modern FLMSTR layout AND converging modern platform indicator
-    // (such as 17 MHz read clock or verified Tiger Point CPU soft strap layout)
     // AND must NOT match legacy layout (prevents legacy Requester ID 0x0000 from triggering modern).
-    // Note: Per DEF-48, geometry extent (max_regions > 5) and raw FLMAP2 byte values (iccriba > 0x30)
-    // are removed as generation proofs. Coreboot ifdtool mandates explicit platform selection (-p)
-    // because descriptor headers alone cannot prove generation without platform context.
+    // Note: Per DEF-53, read-frequency 6 (17 MHz) is repurposed across generations and is NOT
+    // universally unique evidence of Skylake+. Thus, frequency 6 + modern FLMSTR yields Probable,
+    // whereas verified hardware layout like Tiger Point CPU soft strap yields Confirmed.
     let is_tiger_strap = matches!(geometry.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
-    let has_converging_modern_indicator = is_17mhz_read || is_tiger_strap;
-    if is_modern_flmstr && has_converging_modern_indicator && !is_legacy_flmstr {
-        indicators.push("Detected modern Skylake+ / Tiger Point indicators: modern FLMSTR layout with converging modern platform indicator".to_string());
+
+    if is_modern_flmstr && is_tiger_strap && !is_legacy_flmstr {
+        indicators.push("Detected modern Tiger Point indicators: verified CPU soft strap layout with modern FLMSTR".to_string());
         return ProfileResolution {
             profile: IfdProfile::V2Modern,
             confidence: ProfileConfidence::Confirmed,
+            source: ProfileSource::AutoDetected,
+            max_regions: max_regions.min(16),
+            indicators,
+        };
+    }
+
+    if is_modern_flmstr && is_17mhz_read && !is_legacy_flmstr {
+        indicators.push("Detected probable modern Skylake+ indicators: 17 MHz read clock with modern FLMSTR layout (repurposed on later platforms; probable confidence)".to_string());
+        return ProfileResolution {
+            profile: IfdProfile::V2Modern,
+            confidence: ProfileConfidence::Probable,
             source: ProfileSource::AutoDetected,
             max_regions: max_regions.min(16),
             indicators,

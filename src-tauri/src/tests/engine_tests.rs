@@ -1316,8 +1316,8 @@ fn test_ifd_flcomp_read_freq_6_not_standalone_v2_proof() {
     buf[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
     buf[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes());
 
-    // FCBA at 0xA0: FLCOMP freq_read = 6 (bits 23:21 = 6 -> 6 << 21 = 0x00C00000)
-    let flcomp = 6u32 << 21;
+    // FCBA at 0xA0: FLCOMP freq_read = 6 (bits 19:17 = 6 -> 6 << 17 = 0x000C0000) (DEF-53)
+    let flcomp = 6u32 << 17;
     buf[0xA0..0xA4].copy_from_slice(&flcomp.to_le_bytes());
 
     // FRBA at 0x40
@@ -1383,11 +1383,11 @@ fn test_ifd_flmap2_iccriba_accounting_and_safe_boundaries() {
         assert_eq!(geom.iccriba, Some(0x80));
     }
 
-    // Case 4: ICCRIBA absent (raw 0)
+    // Case 4: ICCRIBA absent (raw 0) in valid legacy MCH strap layout (DEF-42, DEF-52)
     {
         let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
         let flmap1: u32 = 0x20; // FMBA=0x20 (0x200)
-        let flmap2: u32 = 0; // ICCRIBA = 0
+        let flmap2: u32 = (0x02 << 8) | 0x30; // MSL=2, FMSBA=0x30 (0x300), ICCRIBA = 0
 
         let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2, 4096);
         assert!(geom.is_valid, "Geometry should be valid: {:?}", geom.validation_errors);
@@ -1621,7 +1621,7 @@ fn test_ifd_unsupported_generation_inference_removed_def48() {
     let flcomp_17mhz = Some(6 << 17); // 17 MHz Skylake indicator
     let res_modern = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp_17mhz, Some(modern_flmstr1), None);
     assert_eq!(res_modern.profile, IfdProfile::V2Modern);
-    assert_eq!(res_modern.confidence, ProfileConfidence::Confirmed);
+    assert_eq!(res_modern.confidence, ProfileConfidence::Probable, "DEF-53: frequency 6 repurposed on later platforms; must be Probable, not Confirmed");
 
     // Modern profile via Tiger Point soft straps + modern FLMSTR
     let flmap2_tiger = (0x04 << 16) | 0x40; // CpuSoftStrap layout
@@ -1629,9 +1629,10 @@ fn test_ifd_unsupported_generation_inference_removed_def48() {
     assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
     assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
 
-    // Legacy profile: legacy FLMSTR1 (0x02030000) + legacy freq + valid legacy NR
+    // Legacy profile: legacy FLMSTR1 (0x02030000) + legacy freq + valid legacy NR + valid legacy FLMAP2 (DEF-52)
     let legacy_flmstr1 = 0x02030000;
-    let res_legacy = detect_ifd_profile_resolution(flmap0, flmap1, 0, flcomp, Some(legacy_flmstr1), None);
+    let flmap2_legacy = (0x02 << 8) | 0x20; // Valid legacy MCH straps (MSL=2, FMSBA=0x20)
+    let res_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_legacy, flcomp, Some(legacy_flmstr1), None);
     assert_eq!(res_legacy.profile, IfdProfile::V1Legacy);
     assert_eq!(res_legacy.confidence, ProfileConfidence::Confirmed);
 }
@@ -1790,4 +1791,231 @@ fn test_observer_targeted_path_fixtures_def50() {
     assert!(snap.fv_block_map_traversed > 0);
     assert!(snap.fv_sentinel_found > 0);
     assert!(snap.fv_sentinel_missing > 0);
+}
+
+#[test]
+fn test_ifd_flmap2_interpretation_edge_cases_def52() {
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+    let flmap1: u32 = 0x20; // FMBA=0x20 (0x200)
+
+    // 1. All-zero FLMAP2 must NOT be classified as LegacyMchStrap (DEF-52)
+    let flmap2_zero = 0u32;
+    assert_eq!(
+        determine_flmap2_interpretation(flmap2_zero),
+        Flmap2Interpretation::Unknown,
+        "All-zero FLMAP2 has no strap definitions; must be classified as Unknown"
+    );
+    let geom_zero = validate_descriptor_geometry(flmap0, flmap1, flmap2_zero, 4096);
+    assert_eq!(geom_zero.flmap2_interpretation, Flmap2Interpretation::Unknown);
+    assert_eq!(geom_zero.fmsba, None);
+    assert_eq!(geom_zero.msl, 0);
+    assert_eq!(geom_zero.iccriba, None);
+    assert_eq!(geom_zero.ril, 0);
+    assert_eq!(geom_zero.raw_flmap2, 0);
+    assert!(geom_zero.is_valid, "All-zero FLMAP2 has no invalid or conflicting section definitions");
+
+    // 2. Valid known layout examples
+    // Legacy MCH strap (upper half 0, lower half valid FMSBA + MSL)
+    let flmap2_legacy = (0x02 << 8) | 0x30;
+    assert_eq!(determine_flmap2_interpretation(flmap2_legacy), Flmap2Interpretation::LegacyMchStrap);
+    let geom_legacy = validate_descriptor_geometry(flmap0, flmap1, flmap2_legacy, 4096);
+    assert_eq!(geom_legacy.flmap2_interpretation, Flmap2Interpretation::LegacyMchStrap);
+    assert_eq!(geom_legacy.fmsba, Some(0x300));
+    assert_eq!(geom_legacy.msl, 2);
+    assert!(geom_legacy.is_valid);
+
+    // Tiger Point CPU Soft Strap (bits 1:0 = 0, bits 15:12 = 0, bits 31:24 = 0, CSSO != 0, CSSL != 0)
+    let flmap2_tiger = (0x04 << 16) | 0x40;
+    assert_eq!(determine_flmap2_interpretation(flmap2_tiger), Flmap2Interpretation::CpuSoftStrap);
+    let geom_tiger = validate_descriptor_geometry(flmap0, flmap1, flmap2_tiger, 4096);
+    assert_eq!(geom_tiger.flmap2_interpretation, Flmap2Interpretation::CpuSoftStrap);
+    assert_eq!(geom_tiger.fmsba, None);
+    assert_eq!(geom_tiger.msl, 0);
+    assert_eq!(geom_tiger.csso_raw, 0x10);
+    assert_eq!(geom_tiger.cssl_raw, 0x04);
+    assert!(geom_tiger.is_valid);
+
+    // ICCRIBA / RIL layout
+    let flmap2_icc = (0x01 << 24) | (0x08 << 16) | (0x02 << 8) | 0x30;
+    assert_eq!(determine_flmap2_interpretation(flmap2_icc), Flmap2Interpretation::IccribaRil);
+    let geom_icc = validate_descriptor_geometry(flmap0, flmap1, flmap2_icc, 4096);
+    assert_eq!(geom_icc.flmap2_interpretation, Flmap2Interpretation::IccribaRil);
+    assert_eq!(geom_icc.iccriba, Some(0x80));
+    assert_eq!(geom_icc.ril, 1);
+    assert_eq!(geom_icc.fmsba, Some(0x300));
+    assert!(geom_icc.is_valid);
+    assert_eq!(geom_icc.msl, 2);
+    assert!(geom_icc.is_valid);
+
+    // 3. Reserved-bit violations in Tiger Point layout
+    // Res1 violation (bits 1:0 non-zero)
+    let flmap2_res1 = (0x04 << 16) | 0x41;
+    assert_eq!(determine_flmap2_interpretation(flmap2_res1), Flmap2Interpretation::Unknown);
+    let geom_res1 = validate_descriptor_geometry(flmap0, flmap1, flmap2_res1, 4096);
+    assert!(!geom_res1.is_valid);
+    assert!(geom_res1.has_unresolved_extents);
+
+    // Res2 violation (bits 15:12 non-zero)
+    let flmap2_res2 = (0x04 << 16) | 0x40 | (0x1 << 12);
+    assert_eq!(determine_flmap2_interpretation(flmap2_res2), Flmap2Interpretation::Unknown);
+    let geom_res2 = validate_descriptor_geometry(flmap0, flmap1, flmap2_res2, 4096);
+    assert!(!geom_res2.is_valid);
+    assert!(geom_res2.has_unresolved_extents);
+
+    // Res3 violation (bits 31:24 non-zero when CSSO is set, and out of ICCRIBA bounds)
+    let flmap2_res3 = (0x01 << 24) | (0x50 << 16) | 0x40;
+    assert_eq!(determine_flmap2_interpretation(flmap2_res3), Flmap2Interpretation::Unknown);
+    let geom_res3 = validate_descriptor_geometry(flmap0, flmap1, flmap2_res3, 4096);
+    assert!(!geom_res3.is_valid);
+    assert!(geom_res3.has_unresolved_extents);
+
+    // 4. Conflicting layout indicators (RIL out of ICCRIBA bounds with CSSO present)
+    let flmap2_conflict = (0x20 << 24) | (0x08 << 16) | 0x40;
+    assert_eq!(determine_flmap2_interpretation(flmap2_conflict), Flmap2Interpretation::Unknown);
+    let geom_conflict = validate_descriptor_geometry(flmap0, flmap1, flmap2_conflict, 4096);
+    assert!(!geom_conflict.is_valid);
+    assert!(geom_conflict.has_unresolved_extents);
+
+    // 5. Unknown layout with plausible lower-half fields (FMSBA=0x20, MSL=2, but upper half unknown non-zero)
+    let flmap2_unknown_plausible = 0x12340220u32;
+    assert_eq!(determine_flmap2_interpretation(flmap2_unknown_plausible), Flmap2Interpretation::Unknown);
+    let geom_unknown = validate_descriptor_geometry(flmap0, flmap1, flmap2_unknown_plausible, 4096);
+    assert_eq!(geom_unknown.flmap2_interpretation, Flmap2Interpretation::Unknown);
+    assert_eq!(geom_unknown.fmsba, None, "Unknown layout must NOT expose speculative FMSBA");
+    assert_eq!(geom_unknown.msl, 0, "Unknown layout must NOT expose speculative MSL");
+    assert_eq!(geom_unknown.iccriba, None, "Unknown layout must NOT expose speculative ICCRIBA");
+    assert_eq!(geom_unknown.ril, 0, "Unknown layout must NOT expose speculative RIL");
+    assert_eq!(geom_unknown.fmsba_raw, 0x20, "Raw FMSBA byte must be preserved");
+    assert!(geom_unknown.has_unresolved_extents);
+    assert!(!geom_unknown.is_valid);
+}
+
+#[test]
+fn test_ifd_profile_read_freq_6_with_modern_flmstr_def53() {
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+    let flmap1: u32 = 0x08; // FMBA=0x80
+    let flmap2_icc: u32 = (0x01 << 24) | (0x31 << 16) | (0x02 << 8) | 0x20;
+
+    let modern_flmstr1 = (0x02 << 20) | (0x03 << 8); // Modern layout (Host CPU reads desc bit 8, BIOS bit 9)
+    let flcomp_17mhz = Some(6u32 << 17); // Read frequency 6 (17 MHz)
+
+    // 1. Modern FLMSTR + freq 6 yields Probable, NOT Confirmed (DEF-53)
+    let res = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(modern_flmstr1), None);
+    assert_eq!(res.profile, IfdProfile::V2Modern);
+    assert_eq!(res.confidence, ProfileConfidence::Probable, "Frequency 6 is repurposed across generations; must be Probable, not Confirmed");
+
+    // 2. Conflicting indicators: legacy frequency (20 MHz) + modern FLMSTR yields Unknown
+    let flcomp_legacy = Some(0u32); // 20 MHz
+    let res_conflict = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_legacy, Some(modern_flmstr1), None);
+    assert_eq!(res_conflict.profile, IfdProfile::Unknown);
+    assert_eq!(res_conflict.confidence, ProfileConfidence::Unknown);
+
+    // 3. Frequency 6 alone with legacy FLMSTR yields Unknown
+    let legacy_flmstr1 = 0x02030000u32;
+    let res_freq6_legacy = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_icc, flcomp_17mhz, Some(legacy_flmstr1), None);
+    assert_eq!(res_freq6_legacy.profile, IfdProfile::Unknown);
+    assert_eq!(res_freq6_legacy.confidence, ProfileConfidence::Unknown);
+
+    // 4. Modern FLMSTR + verified Tiger Point soft straps yields Confirmed
+    let flmap2_tiger = (0x04 << 16) | 0x40;
+    let res_tiger = detect_ifd_profile_resolution(flmap0, flmap1, flmap2_tiger, flcomp_legacy, Some(modern_flmstr1), None);
+    assert_eq!(res_tiger.profile, IfdProfile::V2Modern);
+    assert_eq!(res_tiger.confidence, ProfileConfidence::Confirmed);
+}
+
+#[test]
+fn test_ifd_geometry_unknown_flmap2_safe_bounds_def54() {
+    let flmap0: u32 = (0x04 << 16) | (0x00 << 8) | 0x02; // FRBA=0x40, FCBA=0x20
+    let flmap1: u32 = 0x20; // FMBA=0x200
+    let flmap2_unknown = 0xABCD1234u32;
+
+    let geom = validate_descriptor_geometry(flmap0, flmap1, flmap2_unknown, 4096);
+    assert_eq!(geom.flmap2_interpretation, Flmap2Interpretation::Unknown);
+    assert!(!geom.is_valid, "Geometry must not be valid when FLMAP2 layout is unknown");
+    assert!(geom.has_unresolved_extents);
+    assert_eq!(geom.fmsba, None);
+    assert_eq!(geom.msl, 0);
+    assert_eq!(geom.iccriba, None);
+    assert_eq!(geom.ril, 0);
+    // Physical bounds are still derived from next physical section (FMBA at 0x200)
+    assert!(geom.max_regions_extent > 0, "Physical bounds calculation must remain functional");
+}
+
+#[test]
+fn test_uefi_fv_observer_single_site_accounting_def55() {
+    // DEF-55: Ensure exactly one candidate outcome produces one observer outcome
+    // Truncated buffer (< 0x38 bytes)
+    reset_observer();
+    enable_observer();
+    let truncated_buf = vec![0u8; 32];
+    let reader = BinaryReader::new(&truncated_buf);
+    let res = FirmwareVolume::parse_at(&reader, 0);
+    assert!(res.is_err());
+    let snap = take_snapshot();
+    disable_observer();
+    assert_eq!(snap.fv_fvh_detected, 0);
+    assert_eq!(snap.fv_fvh_rejected, 1, "Exactly one rejection must be recorded on truncated header");
+
+    // Invalid signature offset (< 0x28) in find_volumes
+    reset_observer();
+    enable_observer();
+    let mut early_sig = vec![0u8; 64];
+    early_sig[0..4].copy_from_slice(b"_FVH");
+    let vols = FirmwareVolume::find_volumes(&early_sig);
+    assert!(vols.is_empty());
+    let snap = take_snapshot();
+    disable_observer();
+    assert_eq!(snap.fv_fvh_detected, 0);
+    assert_eq!(snap.fv_fvh_rejected, 1, "Exactly one rejection must be recorded for signature < 0x28");
+
+    // Corrupt checksum in valid volume header
+    reset_observer();
+    enable_observer();
+    let mut corrupt_csum_fv = SyntheticFixtureBuilder::build_valid_firmware_volume(0x1000);
+    corrupt_csum_fv[0x32] ^= 0xFF; // Invert checksum byte
+    let reader_csum = BinaryReader::new(&corrupt_csum_fv);
+    let hdr = FirmwareVolume::parse_at(&reader_csum, 0).expect("Header parses but checksum is invalid");
+    assert!(!hdr.checksum_valid);
+    let snap = take_snapshot();
+    disable_observer();
+    assert_eq!(snap.fv_fvh_detected, 1, "Header parsed successfully");
+    assert_eq!(snap.fv_fvh_rejected, 0);
+    assert_eq!(snap.fv_checksum_evaluated, 1);
+
+    // Valid volume header
+    reset_observer();
+    enable_observer();
+    let valid_fv = SyntheticFixtureBuilder::build_valid_firmware_volume(0x1000);
+    let reader_valid = BinaryReader::new(&valid_fv);
+    let hdr_valid = FirmwareVolume::parse_at(&reader_valid, 0).expect("Header should parse cleanly");
+    assert!(hdr_valid.checksum_valid);
+    let snap = take_snapshot();
+    disable_observer();
+    assert_eq!(snap.fv_fvh_detected, 1);
+    assert_eq!(snap.fv_fvh_rejected, 0);
+    assert_eq!(snap.fv_header_validated, 1);
+    assert_eq!(snap.fv_checksum_evaluated, 1);
+}
+
+#[test]
+fn test_dell_fixture_provenance_reconciliation_def56() {
+    let manifest = load_dell_latitude_manifest();
+
+    // Canonical fixture identification
+    let canonical_sha = manifest["expected_sha256"].as_str().expect("expected_sha256");
+    assert_eq!(canonical_sha, "E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B");
+    let canonical_size = manifest["file_size"].as_u64().expect("file_size");
+    assert_eq!(canonical_size, 13662488);
+
+    // Reconciliation notes verifying DEF-56
+    let recon = &manifest["provenance_reconciliation_notes"];
+    assert_eq!(recon["def_reference"].as_str(), Some("DEF-56"));
+    assert_eq!(
+        recon["canonical_fixture_sha256"].as_str(),
+        Some("E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B")
+    );
+    assert_eq!(
+        recon["alternative_reported_sha256"].as_str(),
+        Some("c5bb883ca09bd8eb38c64eb3d047ec6cb66847deef94e101f3e79e6f315a6e87")
+    );
 }
