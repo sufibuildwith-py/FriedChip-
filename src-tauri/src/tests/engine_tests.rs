@@ -3,7 +3,9 @@ use tempfile::tempdir;
 
 use crate::db::Database;
 use crate::engine::binary::checksums::sha256_hex;
-use crate::engine::binary::ifd::{decode_flreg, IntelFlashDescriptor, IFD_SIGNATURE_MAGIC};
+use crate::engine::binary::ifd::{
+    decode_flreg, IntelFlashDescriptor, ProgrammerCompatibilityStatus, IFD_SIGNATURE_MAGIC,
+};
 use crate::engine::binary::reader::BinaryReader;
 use crate::engine::binary::region::RegionType;
 use crate::engine::testing::fixture_builder::SyntheticFixtureBuilder;
@@ -112,10 +114,12 @@ fn test_ifd_valid_image_parsing_and_gates() {
     assert!(disabled_types.contains(&RegionType::Gbe));
     assert!(disabled_types.contains(&RegionType::PlatformData));
 
-    // Gate 3 programmer compatibility
-    assert!(report.gate3_programmer.passed);
+    // Gate 3 programmer compatibility: Must be Indeterminate without physical hardware evidence
+    assert_eq!(report.gate3_programmer.status, ProgrammerCompatibilityStatus::Indeterminate);
+    assert!(!report.gate3_programmer.passed);
     assert_eq!(report.gate3_programmer.detected_chip_size_bytes, 16 * 1024 * 1024);
     assert_eq!(report.gate3_programmer.detected_chip_size_mb, 16.0);
+    assert!(!report.gate3_programmer.hardware_evidence_present);
 }
 
 #[test]
@@ -126,6 +130,7 @@ fn test_ifd_corrupt_signature_rejection() {
     assert!(!report.gate1_structural.passed);
     assert!(!report.gate1_structural.has_valid_signature);
     assert!(!report.gate2_platform.passed);
+    assert_eq!(report.gate3_programmer.status, ProgrammerCompatibilityStatus::Incompatible);
     assert!(!report.gate3_programmer.passed);
 }
 
@@ -161,23 +166,112 @@ fn test_ifd_fcba_decoding_component_density() {
     assert_eq!(comp.components[0].density_mb, 16.0);
     assert!(comp.fast_read_supported);
     assert_eq!(comp.fast_read_clock_frequency_mhz, 50);
+    assert_eq!(comp.write_erase_clock_frequency_mhz, 33);
+    assert_eq!(comp.read_id_status_clock_frequency_mhz, 33);
 }
 
 #[test]
-fn test_ifd_frap_decoding_master_permissions() {
+fn test_ifd_flcomp_known_raw_register_values() {
+    // Golden Register 1: 0x08900005 (Independent derivation from Intel SPI Programming Guide)
+    // Bits 2:0 = 5 -> 16 MB density
+    // Bits 19:17 = 0 -> 20 MHz Read clock
+    // Bit 20 = 1 -> Fast Read Supported
+    // Bits 23:21 = 4 -> 50 MHz Fast Read clock
+    // Bits 26:24 = 0 -> 20 MHz Write clock
+    // Bits 29:27 = 1 -> 33 MHz Read ID clock
+    let raw1: u32 = 0x08900005;
+    let decoded1 = crate::engine::binary::ifd::decode_flcomp(0x80, raw1, 1);
+    assert_eq!(decoded1.components[0].density_bytes, 16 * 1024 * 1024);
+    assert_eq!(decoded1.read_clock_frequency_mhz, 20);
+    assert!(decoded1.fast_read_supported);
+    assert_eq!(decoded1.fast_read_clock_frequency_mhz, 50);
+    assert_eq!(decoded1.write_erase_clock_frequency_mhz, 20);
+    assert_eq!(decoded1.read_id_status_clock_frequency_mhz, 33);
+
+    // Golden Register 2: Dual-chip configuration 0x0000002B
+    // Bits 2:0 = 3 -> 4 MB Comp 1
+    // Bits 5:3 = 5 -> 16 MB Comp 2
+    // Bit 20 = 0 -> Fast Read Disabled
+    let raw2: u32 = 0x0000002B;
+    let decoded2 = crate::engine::binary::ifd::decode_flcomp(0x80, raw2, 2);
+    assert_eq!(decoded2.components.len(), 2);
+    assert_eq!(decoded2.components[0].density_bytes, 4 * 1024 * 1024);
+    assert_eq!(decoded2.components[1].density_bytes, 16 * 1024 * 1024);
+    assert!(!decoded2.fast_read_supported);
+}
+
+#[test]
+fn test_ifd_flmstr_known_raw_register_values() {
+    // 1. IFD v1 FLMSTR1: 0x02170000 (Host CPU / BIOS on ICH8..Haswell)
+    // Requester ID = 0x0000
+    // Read mask = 0x17 (Descriptor, BIOS, ME, PlatformData readable)
+    // Write mask = 0x02 (BIOS writable only)
+    let rule_v1 = crate::engine::binary::ifd::decode_master_rule(1, "Host CPU / BIOS", 0x02170000, false);
+    assert_eq!(rule_v1.requester_id, Some(0x0000));
+    assert!(rule_v1.descriptor_readable);
+    assert!(!rule_v1.descriptor_writable);
+    assert!(rule_v1.bios_readable);
+    assert!(rule_v1.bios_writable);
+    assert!(rule_v1.me_readable);
+    assert!(!rule_v1.me_writable);
+    assert!(rule_v1.platform_data_readable);
+    assert!(!rule_v1.platform_data_writable);
+
+    // 2. IFD v1 FLMSTR1: 0xFFFFFFFF (Fully Unlocked Descriptor)
+    let rule_unlocked = crate::engine::binary::ifd::decode_master_rule(1, "Host CPU / BIOS", 0xFFFFFFFF, false);
+    assert!(rule_unlocked.descriptor_readable);
+    assert!(rule_unlocked.descriptor_writable);
+    assert!(rule_unlocked.me_readable);
+    assert!(rule_unlocked.me_writable);
+
+    // 3. IFD v2 FLMSTR1: 0x00200300 (Modern Skylake+ offsets: rd_shift=8, wr_shift=20)
+    // Read mask = 0x03 (Descriptor and BIOS readable)
+    // Write mask = 0x02 (BIOS writable only)
+    let rule_v2 = crate::engine::binary::ifd::decode_master_rule(1, "Host CPU / BIOS", 0x00200300, true);
+    assert_eq!(rule_v2.requester_id, None);
+    assert!(rule_v2.descriptor_readable);
+    assert!(!rule_v2.descriptor_writable);
+    assert!(rule_v2.bios_readable);
+    assert!(rule_v2.bios_writable);
+    assert!(!rule_v2.me_readable);
+    assert!(!rule_v2.me_writable);
+}
+
+#[test]
+fn test_ifd_master_permissions_decoding() {
     let img = SyntheticFixtureBuilder::build_valid_ifd_image(16 * 1024 * 1024);
     let report = IntelFlashDescriptor::parse(&img).unwrap();
 
     let perms = report.master_permissions.as_ref().expect("Master permissions should be decoded from FMBA");
-    assert_eq!(perms.frap_raw, 0x04070207);
+    assert_eq!(perms.master_count, 3);
     assert!(perms.host_bios_writable);
     assert!(!perms.host_me_writable);
     assert!(perms.host_cpu.bios_readable);
     assert!(perms.host_cpu.bios_writable);
     assert!(!perms.host_cpu.me_writable);
+    assert!(perms.intel_me.me_readable);
+    assert!(perms.intel_me.me_writable);
+    assert!(!perms.intel_me.bios_writable);
+    assert!(perms.gbe.gbe_readable);
+    assert!(perms.gbe.gbe_writable);
 
     // Gate 3 verification constraints distinguish descriptor permissions from hardware PR registers
     assert!(report.gate3_programmer.verification_constraints.iter().any(|c| c.contains("Protected Range registers (PR0..PR4)")));
+}
+
+#[test]
+fn test_ifd_gate3_programmer_indeterminate_without_hardware() {
+    let img = SyntheticFixtureBuilder::build_valid_ifd_image(16 * 1024 * 1024);
+    let report = IntelFlashDescriptor::parse(&img).unwrap();
+
+    assert!(report.gate1_structural.passed);
+    assert_eq!(
+        report.gate3_programmer.status,
+        ProgrammerCompatibilityStatus::Indeterminate
+    );
+    assert!(!report.gate3_programmer.passed);
+    assert!(!report.gate3_programmer.hardware_evidence_present);
+    assert!(report.gate3_programmer.required_voltage_volts.is_none());
 }
 
 #[test]
@@ -197,6 +291,62 @@ fn test_ifd_frba_out_of_bounds_handling() {
     assert!(!report.gate1_structural.passed);
     assert!(!report.gate1_structural.region_table_in_bounds);
     assert!(report.gate1_structural.issues.iter().any(|i| i.contains("extends beyond image size")));
+}
+
+// -----------------------------------------------------------------------------
+// IN-PROCESS BOUNDED STRESS / FUZZING CAMPAIGN (DEF-14)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_in_process_bounded_parser_stress_fuzzing() {
+    use std::time::Instant;
+
+    let mut state: u64 = 0xDEADBEEFCAFE1337;
+    let mut next_u32 = || -> u32 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (state >> 32) as u32
+    };
+
+    let start = Instant::now();
+    let iterations = 100_000;
+
+    // 1. Fuzz IntelFlashDescriptor::parse with arbitrary malformed headers
+    for _ in 0..iterations {
+        let len = (next_u32() % 4096) as usize + 64;
+        let mut buf = vec![0u8; len];
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&next_u32().to_le_bytes());
+        }
+        let _ = IntelFlashDescriptor::parse(&buf);
+    }
+
+    // 2. Fuzz DellPfsParser::extract with arbitrary truncated/mutated containers
+    for _ in 0..iterations {
+        let len = (next_u32() % 2048) as usize + 32;
+        let mut buf = vec![0u8; len];
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&next_u32().to_le_bytes());
+        }
+        if DellPfsParser::is_dell_pfs(&buf) {
+            let _ = DellPfsParser::extract(&buf, None, "fuzz_input");
+        }
+    }
+
+    // 3. Fuzz FirmwareVolume::find_volumes with arbitrary byte streams
+    for _ in 0..iterations {
+        let len = (next_u32() % 4096) as usize + 64;
+        let mut buf = vec![0u8; len];
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&next_u32().to_le_bytes());
+        }
+        let _ = FirmwareVolume::find_volumes(&buf);
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "[FUZZ EVIDENCE] In-process bounded fuzzing completed: 3 x {} (300,000 total iterations) in {:.2?} with 0 crashes or hangs.",
+        iterations, elapsed
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -278,15 +428,16 @@ fn test_dell_pfs_corrupted_inverted_crc32() {
     assert!(!report.sections[0].payload_inverted_crc32_valid);
 }
 
+// -----------------------------------------------------------------------------
+// REAL-WORLD OEM INTEGRATION TESTS (DEF-13 SEMANTICS)
+// -----------------------------------------------------------------------------
+
 #[test]
+#[ignore = "Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/"]
 fn test_real_world_dell_latitude_5x90_if_available() {
-    let fixture_path = match resolve_dell_latitude_fixture_path() {
-        Some(p) => p,
-        None => {
-            println!("[SKIPPED] test_real_world_dell_latitude_5x90_if_available: Real-world Dell Latitude fixture not found. Skipping test.");
-            return;
-        }
-    };
+    let fixture_path = resolve_dell_latitude_fixture_path().expect(
+        "Required real-world Dell Latitude fixture not found! Fixture must be supplied to execute integration tests.",
+    );
 
     let data = std::fs::read(&fixture_path).expect("Failed to read Dell real-world fixture");
     let actual_hash = sha256_hex(&data).to_uppercase();
@@ -301,27 +452,21 @@ fn test_real_world_dell_latitude_5x90_if_available() {
     let report = DellPfsParser::extract(&data, Some(dir.path()), "Latitude_5X90_1.41.0.exe").unwrap();
 
     assert!(report.total_sections_found >= 1);
-    for (i, c) in report.components.iter().enumerate() {
-        println!("EXTRACTED {}: name='{}', size={}, sha256={}", i, c.name, c.raw_size, c.sha256);
-    }
     assert_eq!(report.components.len(), 14);
 
     let comp_names: Vec<String> = report.components.iter().map(|c| c.name.clone()).collect();
     assert!(comp_names.iter().any(|n| n.to_lowercase().contains("system bios")));
     assert!(comp_names.iter().any(|n| n.to_lowercase().contains("management engine")));
 
-    println!("[PASS] test_real_world_dell_latitude_5x90_if_available: Successfully extracted 12 components from verified Dell package.");
+    println!("[PASS] test_real_world_dell_latitude_5x90_if_available: Successfully extracted 14 components from verified Dell package.");
 }
 
 #[test]
+#[ignore = "Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/"]
 fn test_dell_pfs_differential_regression_against_biosutilities() {
-    let fixture_path = match resolve_dell_latitude_fixture_path() {
-        Some(p) => p,
-        None => {
-            println!("[SKIPPED] test_dell_pfs_differential_regression_against_biosutilities: Real-world Dell Latitude fixture not found. Skipping test.");
-            return;
-        }
-    };
+    let fixture_path = resolve_dell_latitude_fixture_path().expect(
+        "Required real-world Dell Latitude fixture not found! Fixture must be supplied to execute integration tests.",
+    );
 
     let data = std::fs::read(&fixture_path).expect("Failed to read Dell real-world fixture");
     let actual_hash = sha256_hex(&data).to_uppercase();

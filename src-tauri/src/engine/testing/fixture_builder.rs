@@ -24,23 +24,45 @@ impl SyntheticFixtureBuilder {
         let sig_bytes = IFD_SIGNATURE_MAGIC.to_le_bytes();
         data[IFD_SIGNATURE_OFFSET..IFD_SIGNATURE_OFFSET + 4].copy_from_slice(&sig_bytes);
 
-        // 2. FLMAP0 at 0x14: NR=4 (5 regions: 0..4), FRBA=0x04 (byte offset 0x40)
-        let flmap0: u32 = (0x04 << 16) | 0x04;
+        // 2. FLMAP0 at 0x14:
+        // Bits 7:0: FCBA = 0x08 (offset 0x80)
+        // Bits 9:8: NC = 0 (1 component: NC+1 = 1)
+        // Bits 23:16: FRBA = 0x04 (offset 0x40)
+        // Bits 27:24: NR = 4 (5 regions: 0..4, NR+1 = 5)
+        let flmap0: u32 = (0x04 << 24) | (0x04 << 16) | (0x00 << 8) | 0x08;
         data[0x14..0x18].copy_from_slice(&flmap0.to_le_bytes());
 
-        // 3. FLMAP1 at 0x18: NC=0 (1 component), FCBA=0x08 (0x80), FMBA=0x06 (0x60)
-        let flmap1: u32 = (0x06 << 24) | (0x08 << 16) | 0x00;
+        // 3. FLMAP1 at 0x18:
+        // Bits 7:0: FMBA = 0x06 (offset 0x60)
+        // Bits 10:8: NM = 2 (3 masters: NM+1 = 3)
+        // Bits 23:16: FISBA = 0x10 (offset 0x100)
+        // Bits 31:24: ISL = 0x02
+        let flmap1: u32 = (0x02 << 24) | (0x10 << 16) | (0x02 << 8) | 0x06;
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
 
-        // Populate FCBA (0x80): FLCOMP (Comp 1: 16MB = raw 5, Fast Read 50MHz)
+        // 4. FCBA at 0x80: FLCOMP register
+        // Bits 2:0: comp1_density = 5 (16MB)
+        // Bit 20: fastread = 1 (Fast Read Supported)
+        // Bits 23:21: freq_fastread = 4 (50MHz)
+        // Bits 26:24: freq_write = 1 (33MHz)
+        // Bits 29:27: freq_read_id = 1 (33MHz)
         let fcba = 0x80;
-        let flcomp: u32 = 0x05 | (1 << 13) | (4 << 14);
+        let flcomp: u32 = 0x05 | (1 << 20) | (4 << 21) | (1 << 24) | (1 << 27);
         data[fcba..fcba + 4].copy_from_slice(&flcomp.to_le_bytes());
 
-        // Populate FMBA (0x60): FRAP (Host BIOS write permitted: 0x04070207)
+        // 5. FMBA at 0x60: Master section
         let fmba = 0x60;
-        let frap: u32 = 0x04070207;
-        data[fmba..fmba + 4].copy_from_slice(&frap.to_le_bytes());
+        // FLMSTR1 (Host CPU / BIOS): Read Descriptor(0), BIOS(1), ME(2), PlatData(4) -> 0x17 << 16; Write BIOS(1) -> 0x02 << 24
+        let flmstr1: u32 = (0x17 << 16) | (0x02 << 24);
+        data[fmba..fmba + 4].copy_from_slice(&flmstr1.to_le_bytes());
+
+        // FLMSTR2 (Intel ME): Read Descriptor(0), ME(2) -> 0x05 << 16; Write ME(2) -> 0x04 << 24
+        let flmstr2: u32 = (0x05 << 16) | (0x04 << 24);
+        data[fmba + 4..fmba + 8].copy_from_slice(&flmstr2.to_le_bytes());
+
+        // FLMSTR3 (GbE): Read GbE(3) -> 0x08 << 16; Write GbE(3) -> 0x08 << 24
+        let flmstr3: u32 = (0x08 << 16) | (0x08 << 24);
+        data[fmba + 8..fmba + 12].copy_from_slice(&flmstr3.to_le_bytes());
 
         // 4. Region table at FRBA (0x40)
         let frba = 0x40;
