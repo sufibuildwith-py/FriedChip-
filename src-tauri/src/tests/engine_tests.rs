@@ -4,9 +4,9 @@ use tempfile::tempdir;
 use crate::db::Database;
 use crate::engine::binary::checksums::sha256_hex;
 use crate::engine::binary::ifd::{
-    decode_flreg, decode_flreg_with_profile, decode_spi_frequency, IfdProfile,
-    IntelFlashDescriptor, ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus, SpiFrequency,
-    IFD_SIGNATURE_MAGIC,
+    decode_flcomp_with_profile, decode_flreg, decode_flreg_with_profile,
+    decode_master_rule_with_profile, decode_spi_frequency, IfdProfile, IntelFlashDescriptor,
+    ProgrammerCompatibilityStatus, RuntimeChipsetLockStatus, SpiFrequency, IFD_SIGNATURE_MAGIC,
 };
 use crate::engine::binary::reader::BinaryReader;
 use crate::engine::binary::region::RegionType;
@@ -16,28 +16,39 @@ use crate::engine::vendor::dell_pfs::DellPfsParser;
 use crate::models::artifact::{ArtifactFormat, FirmwareArtifact};
 use crate::services::workspace_service::WorkspaceService;
 
-pub const DELL_LATITUDE_REGISTERED_SHA256: &str =
-    "E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B";
+/// Canonical loader for Dell Latitude 5X90 manifest (DEF-30).
+pub fn load_dell_latitude_manifest() -> serde_json::Value {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let p1 = manifest_dir.join("../fixtures/manifests/dell_latitude_5x90.json");
+    let content = std::fs::read_to_string(&p1)
+        .or_else(|_| std::fs::read_to_string("fixtures/manifests/dell_latitude_5x90.json"))
+        .expect("Canonical fixture manifest fixtures/manifests/dell_latitude_5x90.json must exist!");
+    serde_json::from_str(&content).expect("Canonical JSON manifest must be valid")
+}
 
-/// Documented fixture resolution hierarchy for real-world Dell firmware validation:
-/// 1. `DELL_PFS_REALWORLD_FIXTURE` environment variable (explicit file path)
-/// 2. `FRIEDCHIP_REALWORLD_FIXTURES_DIR` environment variable (directory path)
-/// 3. Repository-relative path: `fixtures/realworld/Latitude_5X90_1.41.0.exe`
-/// 4. Fallback legacy scratch path if present
+/// Documented fixture resolution hierarchy for real-world Dell firmware validation (DEF-30):
+/// 1. `FRIEDCHIP_FIXTURE_PATH` or `DELL_PFS_REALWORLD_FIXTURE` environment variable (explicit file path)
+/// 2. `FRIEDCHIP_FIXTURE_DIR` or `FRIEDCHIP_REALWORLD_FIXTURES_DIR` environment variable (directory path)
+/// 3. Repository-relative path: `../fixtures/realworld/Latitude_5X90_1.41.0.exe` or `fixtures/realworld/Latitude_5X90_1.41.0.exe`
+/// (No hardcoded developer scratch directories!)
 fn resolve_dell_latitude_fixture_path() -> Option<PathBuf> {
     // 1. Explicit fixture file override
-    if let Ok(path_str) = std::env::var("DELL_PFS_REALWORLD_FIXTURE") {
-        let p = PathBuf::from(path_str);
-        if p.exists() {
-            return Some(p);
+    for env_var in &["FRIEDCHIP_FIXTURE_PATH", "DELL_PFS_REALWORLD_FIXTURE"] {
+        if let Ok(path_str) = std::env::var(env_var) {
+            let p = PathBuf::from(path_str);
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
 
     // 2. Explicit fixtures directory override
-    if let Ok(dir_str) = std::env::var("FRIEDCHIP_REALWORLD_FIXTURES_DIR") {
-        let p = PathBuf::from(dir_str).join("Latitude_5X90_1.41.0.exe");
-        if p.exists() {
-            return Some(p);
+    for env_var in &["FRIEDCHIP_FIXTURE_DIR", "FRIEDCHIP_REALWORLD_FIXTURES_DIR"] {
+        if let Ok(dir_str) = std::env::var(env_var) {
+            let p = PathBuf::from(dir_str).join("Latitude_5X90_1.41.0.exe");
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
 
@@ -51,14 +62,6 @@ fn resolve_dell_latitude_fixture_path() -> Option<PathBuf> {
     let cwd_path = PathBuf::from("fixtures/realworld/Latitude_5X90_1.41.0.exe");
     if cwd_path.exists() {
         return Some(cwd_path);
-    }
-
-    // 4. Fallback legacy scratch directory if present
-    let scratch_path = PathBuf::from(
-        "C:/Users/xtrar/.gemini/antigravity/brain/2b8463af-e2de-426c-8983-bb9ac8466728/scratch/Latitude_5X90_1.41.0.exe",
-    );
-    if scratch_path.exists() {
-        return Some(scratch_path);
     }
 
     None
@@ -116,15 +119,16 @@ fn test_ifd_valid_image_parsing_and_gates() {
     assert!(disabled_types.contains(&RegionType::Gbe));
     assert!(disabled_types.contains(&RegionType::PlatformData));
 
-    // Gate 3 programmer compatibility: Must be Indeterminate without physical hardware evidence
+    // Gate 3 programmer compatibility: Must be Indeterminate without physical hardware evidence (DEF-19, DEF-29)
     assert_eq!(report.gate3_programmer.status, ProgrammerCompatibilityStatus::Indeterminate);
     assert!(!report.gate3_programmer.passed);
-    assert_eq!(report.gate3_programmer.detected_chip_size_bytes, 16 * 1024 * 1024);
-    assert_eq!(report.gate3_programmer.detected_chip_size_mb, 16.0);
+    assert_eq!(report.gate3_programmer.descriptor_inferred_flash_capacity_bytes, 16 * 1024 * 1024);
+    assert_eq!(report.gate3_programmer.descriptor_inferred_flash_capacity_mb, 16.0);
     assert!(!report.gate3_programmer.hardware_evidence_present);
     assert_eq!(report.profile, IfdProfile::V1Legacy);
     assert_eq!(report.gate2_platform.profile, IfdProfile::V1Legacy);
     assert!(report.gate3_programmer.host_descriptor_bios_write_allowed);
+    assert!(!report.gate3_programmer.host_descriptor_write_disabled);
     assert_eq!(report.gate3_programmer.runtime_chipset_lock_status, RuntimeChipsetLockStatus::Indeterminate);
 }
 
@@ -136,7 +140,8 @@ fn test_ifd_corrupt_signature_rejection() {
     assert!(!report.gate1_structural.passed);
     assert!(!report.gate1_structural.has_valid_signature);
     assert!(!report.gate2_platform.passed);
-    assert_eq!(report.gate3_programmer.status, ProgrammerCompatibilityStatus::Incompatible);
+    // Gate 3 remains Indeterminate even on Gate 1 structural failure (DEF-29)
+    assert_eq!(report.gate3_programmer.status, ProgrammerCompatibilityStatus::Indeterminate);
     assert!(!report.gate3_programmer.passed);
 }
 
@@ -358,8 +363,9 @@ fn test_ifd_flcomp_reserved_frequency_handling() {
 }
 
 #[test]
-fn test_ifd_differential_regression_against_coreboot_ifdtool() {
-    // Verifies differential parity with coreboot util/ifdtool/ifdtool.h and ifdtool.c:
+fn test_ifd_golden_vector_regression_against_coreboot_ifdtool() {
+    // [GOLDEN_VECTOR_REGRESSION] Verifies register decoding parity against upstream
+    // coreboot util/ifdtool/ifdtool.h and ifdtool.c (commit 66e704b1):
     // 1. Master bit shifts
     // coreboot: FLMSTR_WR_SHIFT_V1 = 24, FLMSTR_RD_SHIFT_V1 = 16
     // coreboot: FLMSTR_WR_SHIFT_V2 = 20, FLMSTR_RD_SHIFT_V2 = 8
@@ -380,6 +386,56 @@ fn test_ifd_differential_regression_against_coreboot_ifdtool() {
     let flcomp_v2 = crate::engine::binary::ifd::decode_flcomp_with_profile(0x80, 0x0F5, 2, IfdProfile::V2Modern);
     assert_eq!(flcomp_v2.components[0].density_bytes, 16 * 1024 * 1024);
     assert_eq!(flcomp_v2.components[1].density_bytes, 0); // 0xF is unused
+}
+
+#[test]
+fn test_ifd_flmap0_nr_reserved_bit27_isolation() {
+    // FLMAP0 with NR = 4 (bits 26:24 = 0b100) and reserved bit 27 set (0b1000 << 24 = 0x08000000)
+    let flmap0_with_bit27 = (0x0C << 24) | (0x04 << 16) | 0x08; // bit 27 and bit 26 set
+    let flmap0_without_bit27 = (0x04 << 24) | (0x04 << 16) | 0x08; // only bit 26 set (NR = 4)
+
+    // With 3-bit mask ((flmap0 >> 24) & 0x07), both yield nr_bits = 4 (DEF-25.2)
+    let nr_with = ((flmap0_with_bit27 >> 24) & 0x07) as usize;
+    let nr_without = ((flmap0_without_bit27 >> 24) & 0x07) as usize;
+    assert_eq!(nr_with, 4);
+    assert_eq!(nr_without, 4);
+
+    // Profile detection must not be tricked into modern profile by reserved bit 27
+    let flmap1 = (0x02 << 24) | (0x10 << 16) | (0x02 << 8) | 0x06;
+    let res = crate::engine::binary::ifd::detect_ifd_profile_resolution(flmap0_with_bit27, flmap1, 0, None, None, None);
+    assert_eq!(res.profile, IfdProfile::V1Legacy);
+}
+
+#[test]
+fn test_ifd_unknown_profile_safe_fallback_no_speculative_decoding() {
+    // 1. FLREG with Unknown profile returns (0, 0, false) (DEF-26)
+    let (base, limit, enabled) = decode_flreg_with_profile(0x12345678, IfdProfile::Unknown);
+    assert_eq!(base, 0);
+    assert_eq!(limit, 0);
+    assert!(!enabled);
+
+    // 2. SPI Frequency with Unknown profile never claims a known MHz frequency (DEF-26)
+    for bit in 0..8 {
+        let freq = decode_spi_frequency(bit, IfdProfile::Unknown);
+        assert_eq!(freq.mhz_or_zero(), 0);
+        assert_eq!(freq, SpiFrequency::Reserved(bit));
+    }
+
+    // 3. FLCOMP with Unknown profile preserves raw register without claiming decoded MB density (DEF-26)
+    let comp_info = decode_flcomp_with_profile(0x80, 0x12345678, 2, IfdProfile::Unknown);
+    assert_eq!(comp_info.flcomp_raw, 0x12345678);
+    for c in comp_info.components {
+        assert_eq!(c.density_bytes, 0);
+        assert_eq!(c.density_mb, 0.0);
+    }
+    assert_eq!(comp_info.read_clock_frequency_mhz, 0);
+
+    // 4. FLMSTR with Unknown profile yields no inferred permissions (DEF-26)
+    let master = decode_master_rule_with_profile(1, "Host", 0xFFFFFFFF, IfdProfile::Unknown);
+    assert_eq!(master.read_mask, 0);
+    assert_eq!(master.write_mask, 0);
+    assert!(!master.bios_writable);
+    assert!(!master.bios_readable);
 }
 
 #[test]
@@ -412,72 +468,233 @@ fn test_in_process_bounded_parser_stress_fuzzing() {
     let iterations = 100_000;
 
     let ifd_seed = SyntheticFixtureBuilder::build_valid_ifd_image(4096);
+    let ifd_seed_v2 = SyntheticFixtureBuilder::build_valid_ifd_v2_image(4096);
     let pfs_seed = SyntheticFixtureBuilder::build_synthetic_dell_pfs(&[("BIOS", "1.0", b"TEST_PAYLOAD")]);
     let fv_seed = SyntheticFixtureBuilder::build_valid_firmware_volume(4096);
 
-    // 1. Structure-aware fuzzing of Intel Flash Descriptor
-    for i in 0..iterations {
-        let buf = if (i % 4) == 0 {
-            let mut seeded = ifd_seed.clone();
-            let mut_pos = (next_u32() as usize) % seeded.len();
-            let mut_val = (next_u32() & 0xFF) as u8;
-            seeded[mut_pos] ^= mut_val;
-            seeded
-        } else {
-            let len = (next_u32() % 4096) as usize + 64;
-            let mut b = vec![0u8; len];
-            for chunk in b.chunks_exact_mut(4) {
-                chunk.copy_from_slice(&next_u32().to_le_bytes());
-            }
-            b
-        };
-        let _ = IntelFlashDescriptor::parse(&buf);
-    }
+    // 1. Structure-aware mutation testing of Intel Flash Descriptor (DEF-32)
+    let mut ifd_clean_rejections = 0usize;
+    let mut ifd_successful_parses = 0usize;
 
-    // 2. Structure-aware fuzzing of Dell PFS Container
     for i in 0..iterations {
-        let buf = if (i % 4) == 0 {
-            let mut seeded = pfs_seed.clone();
-            let mut_pos = (next_u32() as usize) % seeded.len();
-            let mut_val = (next_u32() & 0xFF) as u8;
-            seeded[mut_pos] ^= mut_val;
-            seeded
-        } else {
-            let len = (next_u32() % 2048) as usize + 32;
-            let mut b = vec![0u8; len];
-            for chunk in b.chunks_exact_mut(4) {
-                chunk.copy_from_slice(&next_u32().to_le_bytes());
+        let buf = match i % 8 {
+            0 => {
+                // Mutate FLVALSIG at offset 0x10
+                let mut b = ifd_seed.clone();
+                b[0x10] ^= ((next_u32() & 0xFF) as u8) | 0x01;
+                b
             }
-            b
+            1 => {
+                // Mutate FLMAP0 reserved bits (e.g. bit 27, bits 31:28)
+                let mut b = ifd_seed.clone();
+                b[0x17] ^= ((next_u32() & 0x0F) as u8) << 3;
+                b
+            }
+            2 => {
+                // Mutate FCBA / FRBA / FMBA offsets in FLMAP0/FLMAP1
+                let mut b = ifd_seed_v2.clone();
+                let target = 0x14 + ((next_u32() % 8) as usize);
+                b[target] = (next_u32() & 0xFF) as u8;
+                b
+            }
+            3 => {
+                // Mutate FLREG limit/base at FRBA (0x40..0x80)
+                let mut b = ifd_seed_v2.clone();
+                let reg_target = 0x40 + ((next_u32() % 64) as usize);
+                b[reg_target] = (next_u32() & 0xFF) as u8;
+                b
+            }
+            4 => {
+                // Mutate FLCOMP density/frequency at FCBA (0xA0)
+                let mut b = ifd_seed_v2.clone();
+                b[0xA0] = (next_u32() & 0xFF) as u8;
+                b[0xA1] = (next_u32() & 0xFF) as u8;
+                b[0xA2] = (next_u32() & 0xFF) as u8;
+                b
+            }
+            5 => {
+                // Mutate FLMSTR at FMBA (0x80)
+                let mut b = ifd_seed_v2.clone();
+                let master_target = 0x80 + ((next_u32() % 16) as usize);
+                b[master_target] = (next_u32() & 0xFF) as u8;
+                b
+            }
+            6 => {
+                // Truncate at critical descriptor boundaries (16, 20, 24, 32, 64, 128, 512, 1024, 2048, 4095)
+                let trunc_points = [16, 20, 24, 32, 64, 128, 512, 1024, 2048, 4095];
+                let pt = trunc_points[(next_u32() as usize) % trunc_points.len()];
+                let mut b = ifd_seed.clone();
+                b.truncate(pt);
+                b
+            }
+            _ => {
+                // Random byte sequence
+                let len = (next_u32() % 4096) as usize + 64;
+                let mut b = vec![0u8; len];
+                for chunk in b.chunks_exact_mut(4) {
+                    chunk.copy_from_slice(&next_u32().to_le_bytes());
+                }
+                b
+            }
         };
-        if DellPfsParser::is_dell_pfs(&buf) {
-            let _ = DellPfsParser::extract(&buf, None, "fuzz_input");
+
+        match IntelFlashDescriptor::parse(&buf) {
+            Ok(rep) => {
+                if rep.gate1_structural.passed {
+                    ifd_successful_parses += 1;
+                } else {
+                    ifd_clean_rejections += 1;
+                }
+            }
+            Err(_) => {
+                ifd_clean_rejections += 1;
+            }
         }
     }
 
-    // 3. Structure-aware fuzzing of UEFI Firmware Volumes
+    // 2. Structure-aware mutation testing of Dell PFS Container (DEF-32)
+    let mut pfs_clean_rejections = 0usize;
+    let mut pfs_successful_parses = 0usize;
+
     for i in 0..iterations {
-        let buf = if (i % 4) == 0 {
-            let mut seeded = fv_seed.clone();
-            let mut_pos = (next_u32() as usize) % seeded.len();
-            let mut_val = (next_u32() & 0xFF) as u8;
-            seeded[mut_pos] ^= mut_val;
-            seeded
-        } else {
-            let len = (next_u32() % 4096) as usize + 64;
-            let mut b = vec![0u8; len];
-            for chunk in b.chunks_exact_mut(4) {
-                chunk.copy_from_slice(&next_u32().to_le_bytes());
+        let buf = match i % 8 {
+            0 => {
+                // Mutate PFS.HDR. magic signature
+                let mut b = pfs_seed.clone();
+                b[0] ^= 0x01;
+                b
             }
-            b
+            1 => {
+                // Mutate entry count / offsets
+                let mut b = pfs_seed.clone();
+                let pos = ((next_u32() as usize) % 32).min(b.len().saturating_sub(1));
+                b[pos] ^= 0xFF;
+                b
+            }
+            2 => {
+                // Mutate section lengths
+                let mut b = pfs_seed.clone();
+                if b.len() > 16 {
+                    b[8] = (next_u32() & 0xFF) as u8;
+                }
+                b
+            }
+            3 => {
+                // Corrupt ZLIB payload stream
+                let mut b = pfs_seed.clone();
+                if b.len() > 32 {
+                    let zlib_pos = 16 + ((next_u32() as usize) % (b.len() - 20));
+                    b[zlib_pos] ^= 0xAA;
+                }
+                b
+            }
+            4 => {
+                // Corrupt XOR checksum
+                let mut b = pfs_seed.clone();
+                if b.len() > 8 {
+                    let end = b.len() - 1;
+                    b[end] ^= 0x55;
+                }
+                b
+            }
+            5 => {
+                // Truncate container at arbitrary offset
+                let mut b = pfs_seed.clone();
+                let cut = (next_u32() as usize % b.len()).max(4);
+                b.truncate(cut);
+                b
+            }
+            _ => {
+                // Variable length random buffer
+                let len = (next_u32() % 2048) as usize + 32;
+                let mut b = vec![0u8; len];
+                for chunk in b.chunks_exact_mut(4) {
+                    chunk.copy_from_slice(&next_u32().to_le_bytes());
+                }
+                b
+            }
         };
-        let _ = FirmwareVolume::find_volumes(&buf);
+
+        // Every buffer directly invokes extract() without superficial filter gate (DEF-32)
+        match DellPfsParser::extract(&buf, None, "fuzz_input") {
+            Ok(_) => pfs_successful_parses += 1,
+            Err(_) => pfs_clean_rejections += 1,
+        }
     }
+
+    // 3. Structure-aware mutation testing of UEFI Firmware Volumes (DEF-32)
+    let mut fv_clean_rejections = 0usize;
+    let mut fv_successful_parses = 0usize;
+
+    for i in 0..iterations {
+        let buf = match i % 8 {
+            0 => {
+                // Mutate _FVH signature at offset 0x28
+                let mut b = fv_seed.clone();
+                if b.len() > 0x2C {
+                    b[0x28] ^= 0x01;
+                }
+                b
+            }
+            1 => {
+                // Mutate header length at offset 0x30
+                let mut b = fv_seed.clone();
+                if b.len() > 0x32 {
+                    b[0x30] = (next_u32() & 0xFF) as u8;
+                }
+                b
+            }
+            2 => {
+                // Mutate checksum at offset 0x32
+                let mut b = fv_seed.clone();
+                if b.len() > 0x34 {
+                    b[0x32] ^= 0xFF;
+                }
+                b
+            }
+            3 => {
+                // Mutate block map entries / missing sentinel
+                let mut b = fv_seed.clone();
+                if b.len() > 0x48 {
+                    b[0x38] = (next_u32() & 0xFF) as u8;
+                    b[0x3C] = (next_u32() & 0xFF) as u8;
+                }
+                b
+            }
+            4 => {
+                // Truncate header
+                let mut b = fv_seed.clone();
+                let cut = ((next_u32() as usize) % 0x60).max(8);
+                b.truncate(cut);
+                b
+            }
+            _ => {
+                // Random buffer
+                let len = (next_u32() % 4096) as usize + 64;
+                let mut b = vec![0u8; len];
+                for chunk in b.chunks_exact_mut(4) {
+                    chunk.copy_from_slice(&next_u32().to_le_bytes());
+                }
+                b
+            }
+        };
+
+        let volumes = FirmwareVolume::find_volumes(&buf);
+        if !volumes.is_empty() {
+            fv_successful_parses += 1;
+        } else {
+            fv_clean_rejections += 1;
+        }
+    }
+
+    assert_eq!(ifd_successful_parses + ifd_clean_rejections, iterations);
+    assert_eq!(pfs_successful_parses + pfs_clean_rejections, iterations);
+    assert_eq!(fv_successful_parses + fv_clean_rejections, iterations);
 
     let elapsed = start.elapsed();
     println!(
-        "[FUZZ EVIDENCE] In-process structure-aware fuzzing completed: 3 x {} (300,000 total iterations) in {:.2?} with 0 crashes or hangs.",
-        iterations, elapsed
+        "[FUZZ EVIDENCE] Structure-aware mutation testing completed: 3 x {} (300,000 total iterations) in {:.2?} with 0 crashes or hangs (IFD valid/rejected: {}/{}, PFS valid/rejected: {}/{}, FV valid/rejected: {}/{}).",
+        iterations, elapsed, ifd_successful_parses, ifd_clean_rejections, pfs_successful_parses, pfs_clean_rejections, fv_successful_parses, fv_clean_rejections
     );
 }
 
@@ -567,14 +784,25 @@ fn test_dell_pfs_corrupted_inverted_crc32() {
 #[test]
 #[ignore = "Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/"]
 fn test_real_world_dell_latitude_5x90_if_available() {
+    let manifest = load_dell_latitude_manifest();
+    let expected_hash = manifest["expected_sha256"]
+        .as_str()
+        .expect("Manifest must contain expected_sha256")
+        .to_uppercase();
+    let expected_size = manifest["file_size"]
+        .as_u64()
+        .expect("Manifest must contain file_size") as usize;
+
     let fixture_path = resolve_dell_latitude_fixture_path().expect(
         "Required real-world Dell Latitude fixture not found! Fixture must be supplied to execute integration tests.",
     );
 
     let data = std::fs::read(&fixture_path).expect("Failed to read Dell real-world fixture");
+    assert_eq!(data.len(), expected_size, "Dell real-world fixture file size mismatch!");
+
     let actual_hash = sha256_hex(&data).to_uppercase();
     assert_eq!(
-        actual_hash, DELL_LATITUDE_REGISTERED_SHA256,
+        actual_hash, expected_hash,
         "Dell real-world fixture SHA-256 verification failed! Corrupted or altered fixture binary."
     );
 
@@ -596,6 +824,12 @@ fn test_real_world_dell_latitude_5x90_if_available() {
 #[test]
 #[ignore = "Real-world OEM integration test requires Latitude_5X90_1.41.0.exe fixture in fixtures/realworld/"]
 fn test_dell_pfs_differential_regression_against_biosutilities() {
+    let manifest = load_dell_latitude_manifest();
+    let expected_hash = manifest["expected_sha256"]
+        .as_str()
+        .expect("Manifest must contain expected_sha256")
+        .to_uppercase();
+
     let fixture_path = resolve_dell_latitude_fixture_path().expect(
         "Required real-world Dell Latitude fixture not found! Fixture must be supplied to execute integration tests.",
     );
@@ -603,7 +837,7 @@ fn test_dell_pfs_differential_regression_against_biosutilities() {
     let data = std::fs::read(&fixture_path).expect("Failed to read Dell real-world fixture");
     let actual_hash = sha256_hex(&data).to_uppercase();
     assert_eq!(
-        actual_hash, DELL_LATITUDE_REGISTERED_SHA256,
+        actual_hash, expected_hash,
         "Dell real-world fixture SHA-256 verification failed!"
     );
 
@@ -674,9 +908,15 @@ fn test_dell_pfs_differential_regression_against_biosutilities() {
 #[test]
 #[should_panic(expected = "SHA-256 verification failed")]
 fn test_real_world_fixture_hash_mismatch_panics() {
+    let manifest = load_dell_latitude_manifest();
+    let expected_hash = manifest["expected_sha256"]
+        .as_str()
+        .expect("Manifest must contain expected_sha256")
+        .to_uppercase();
+
     let dummy_data = b"CORRUPTED_DUMMY_FIRMWARE_PAYLOAD";
     let actual_hash = sha256_hex(dummy_data).to_uppercase();
-    if actual_hash != DELL_LATITUDE_REGISTERED_SHA256 {
+    if actual_hash != expected_hash {
         panic!("Dell real-world fixture SHA-256 verification failed! Corrupted or altered fixture binary.");
     }
 }

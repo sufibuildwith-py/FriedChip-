@@ -6,18 +6,44 @@ use crate::error::AppError;
 pub const IFD_SIGNATURE_OFFSET: usize = 0x10;
 pub const IFD_SIGNATURE_MAGIC: u32 = 0x0FF0A55A;
 
-/// Explicit Intel Flash Descriptor Profiles (DEF-15).
+/// Explicit Intel Flash Descriptor Profiles (DEF-15, DEF-27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IfdProfile {
     /// IFD v1.0 (Legacy: ICH8 through Wildcat Point / Broadwell, 5-series through 9-series, Bay Trail)
     V1Legacy,
-    /// IFD v1.5 (Intermediate: Intel Wellsburg C610 / Grantley server platforms with 8 regions)
+    /// IFD v1.5 (Provisional: Intel Wellsburg C610 enterprise server PCH; unverified against authentic dump)
     V1_5Intermediate,
     /// IFD v2.0 (Modern: Skylake / Sunrise Point 100-series through 700-series, Meteor Lake)
     V2Modern,
     /// Unknown / Unclassified profile (cannot be safely verified from available markers)
     Unknown,
+}
+
+/// Confidence level of the profile resolution (DEF-25.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProfileConfidence {
+    Confirmed,
+    Probable,
+    Unknown,
+}
+
+/// Provenance of the assigned profile (DEF-25.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProfileSource {
+    AutoDetected,
+    UserOverride,
+}
+
+/// Detailed resolution metadata for profile assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileResolution {
+    pub profile: IfdProfile,
+    pub confidence: ProfileConfidence,
+    pub source: ProfileSource,
+    pub max_regions: usize,
 }
 
 /// SPI Clock Frequency representation supporting explicit reserved/repurposed encodings (DEF-17).
@@ -57,13 +83,10 @@ pub fn decode_spi_frequency(bits: u8, profile: IfdProfile) -> SpiFrequency {
             6 => SpiFrequency::Mhz(17),
             _ => SpiFrequency::Reserved(val),
         },
-        IfdProfile::Unknown => match val {
-            0 => SpiFrequency::Mhz(20),
-            1 => SpiFrequency::Mhz(33),
-            2 => SpiFrequency::Mhz(48),
-            4 => SpiFrequency::Mhz(50),
-            _ => SpiFrequency::Reserved(val),
-        },
+        IfdProfile::Unknown => {
+            // UNKNOWN profile must never claim a known frequency (DEF-26)
+            SpiFrequency::Reserved(val)
+        }
     }
 }
 
@@ -72,16 +95,40 @@ pub fn decode_spi_frequency_mhz(bits: u8) -> u32 {
     decode_spi_frequency(bits, IfdProfile::V1Legacy).mhz_or_zero()
 }
 
-/// Profile-aware FLREG register decoding (DEF-16).
+/// Derives the physical bounds on the region table from descriptor section geometry (DEF-25.3, coreboot max_regions_from_fdbar).
+pub fn max_regions_from_geometry(fcba: usize, fmba: usize, frba: usize, fpsba: usize) -> usize {
+    const FLUMAP1_OFFSET: usize = 0x0EFC; // 4096 - 260
+    const MAX_REGIONS: usize = 16;
+
+    let mut sorted = [fcba, fmba, frba, fpsba, FLUMAP1_OFFSET];
+    sorted.sort_unstable();
+
+    for i in 0..sorted.len().saturating_sub(1) {
+        if sorted[i] == frba {
+            let next = sorted[i + 1];
+            if next > frba {
+                let avail = next - frba;
+                return (avail / 4).min(MAX_REGIONS);
+            }
+        }
+    }
+    0
+}
+
+/// Profile-aware FLREG register decoding (DEF-16, DEF-26).
 ///
 /// Returns `(base_address, limit_address, is_enabled)`.
 /// Inclusive limit semantics: limit address includes 0xFFF offset.
 /// All address calculations use checked/saturating arithmetic.
+/// If profile is `Unknown`, returns `(0, 0, false)` to avoid false positive address mapping.
 pub fn decode_flreg_with_profile(val: u32, profile: IfdProfile) -> (usize, usize, bool) {
     let (base_mask, limit_mask) = match profile {
-        IfdProfile::V1Legacy => (0x0FFF, 0x0FFF),
-        IfdProfile::V1_5Intermediate => (0x1FFF, 0x1FFF),
-        IfdProfile::V2Modern | IfdProfile::Unknown => (0x7FFF, 0x7FFF),
+        IfdProfile::V1Legacy | IfdProfile::V1_5Intermediate => (0x0FFF, 0x0FFF),
+        IfdProfile::V2Modern => (0x7FFF, 0x7FFF),
+        IfdProfile::Unknown => {
+            // UNKNOWN profile must not assume 12-bit or 15-bit address shifts (DEF-26)
+            return (0, 0, false);
+        }
     };
 
     let base_raw = (val & base_mask) as usize;
@@ -125,12 +172,14 @@ pub struct Gate2PlatformCompatibility {
     pub platform_family: String,
     pub descriptor_version: String,
     pub profile: IfdProfile,
+    pub confidence: ProfileConfidence,
+    pub profile_source: ProfileSource,
     pub region_count: usize,
     pub enabled_regions: Vec<String>,
     pub compatibility_notes: Vec<String>,
 }
 
-/// Programmer compatibility assessment states (DEF-19).
+/// Programmer compatibility assessment states (DEF-19, DEF-29).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProgrammerCompatibilityStatus {
@@ -139,7 +188,7 @@ pub enum ProgrammerCompatibilityStatus {
     Indeterminate,
 }
 
-/// Runtime chipset lock status representation (DEF-18).
+/// Runtime chipset lock status representation (DEF-18, DEF-28).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RuntimeChipsetLockStatus {
@@ -148,15 +197,17 @@ pub enum RuntimeChipsetLockStatus {
     Indeterminate,
 }
 
-/// Programmer compatibility assessment results.
+/// Programmer compatibility assessment results (DEF-28, DEF-29).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gate3ProgrammerCompatibility {
     pub status: ProgrammerCompatibilityStatus,
     pub passed: bool,
-    pub detected_chip_size_bytes: usize,
-    pub detected_chip_size_mb: f64,
-    pub host_flashing_locked: bool,
+    #[serde(alias = "detected_chip_size_bytes")]
+    pub descriptor_inferred_flash_capacity_bytes: usize,
+    #[serde(alias = "detected_chip_size_mb")]
+    pub descriptor_inferred_flash_capacity_mb: f64,
     pub host_descriptor_bios_write_allowed: bool,
+    pub host_descriptor_write_disabled: bool,
     pub runtime_chipset_lock_status: RuntimeChipsetLockStatus,
     pub hardware_evidence_present: bool,
     pub required_voltage_volts: Option<f64>,
@@ -241,7 +292,7 @@ pub struct IfdAnalysisReport {
     pub gate3_programmer: Gate3ProgrammerCompatibility,
 }
 
-/// Decodes the 32-bit FLCOMP register at FCBA into `FlashComponentsInfo` with profile awareness (DEF-17).
+/// Decodes the 32-bit FLCOMP register at FCBA into `FlashComponentsInfo` with profile awareness (DEF-17, DEF-26).
 pub fn decode_flcomp_with_profile(
     fcba_offset: usize,
     flcomp: u32,
@@ -273,8 +324,8 @@ pub fn decode_flcomp_with_profile(
                 });
             }
         }
-        IfdProfile::V1_5Intermediate | IfdProfile::V2Modern | IfdProfile::Unknown => {
-            // IFD v2: 4-bit density fields (bits 3:0 for Comp 1, bits 7:4 for Comp 2)
+        IfdProfile::V1_5Intermediate | IfdProfile::V2Modern => {
+            // IFD v2 / Wellsburg: 4-bit density fields (bits 3:0 for Comp 1, bits 7:4 for Comp 2)
             let raw1 = (flcomp & 0x0F) as u8;
             let size1 = if raw1 <= 7 { (512 * 1024) << raw1 } else { 0 };
             comp_densities.push(FlashComponentDensity {
@@ -292,6 +343,17 @@ pub fn decode_flcomp_with_profile(
                     raw_bits: raw2,
                     density_bytes: size2,
                     density_mb: size2 as f64 / (1024.0 * 1024.0),
+                });
+            }
+        }
+        IfdProfile::Unknown => {
+            // UNKNOWN profile preserves raw register without claiming decoded MB density (DEF-26)
+            for i in 1..=component_count.min(2) {
+                comp_densities.push(FlashComponentDensity {
+                    component_index: i,
+                    raw_bits: 0,
+                    density_bytes: 0,
+                    density_mb: 0.0,
                 });
             }
         }
@@ -337,33 +399,39 @@ pub fn decode_flcomp(fcba_offset: usize, flcomp: u32, component_count: usize) ->
     decode_flcomp_with_profile(fcba_offset, flcomp, component_count, IfdProfile::V1Legacy)
 }
 
-/// Decodes an individual 32-bit FLMSTR register into a `MasterAccessRule` with profile awareness (DEF-18).
+/// Decodes an individual 32-bit FLMSTR register into a `MasterAccessRule` with profile awareness (DEF-18, DEF-26).
 pub fn decode_master_rule_with_profile(
     master_id: usize,
     master_name: &str,
     flmstr: u32,
     profile: IfdProfile,
 ) -> MasterAccessRule {
-    let is_v2 = profile == IfdProfile::V2Modern;
-    let (requester_id, read_mask, write_mask) = if !is_v2 {
-        // IFD v1 (Legacy ICH8..Wildcat Point / Broadwell, 5-series..9-series)
-        // Bits 15:0 = Requester ID
-        // Bits 23:16 = Read access mask (regions 0..7)
-        // Bits 31:24 = Write access mask (regions 0..7)
-        let req_id = (flmstr & 0xFFFF) as u16;
-        let r_mask = ((flmstr >> 16) & 0xFF) as u16;
-        let w_mask = ((flmstr >> 24) & 0xFF) as u16;
-        (Some(req_id), r_mask, w_mask)
-    } else {
-        // IFD v2 (Modern Skylake / Sunrise Point 100-series through 700-series)
-        // Bits 19:8 = Read access mask (regions 0..11)
-        // Bits 31:20 = Write access mask (regions 0..11)
-        let mut r_mask = ((flmstr >> 8) & 0xFFF) as u16;
-        let mut w_mask = ((flmstr >> 20) & 0xFFF) as u16;
-        // Extended regions 12..15 in Cannon Lake+
-        r_mask |= ((flmstr & 0x0F) as u16) << 12;
-        w_mask |= (((flmstr >> 4) & 0x0F) as u16) << 12;
-        (None, r_mask, w_mask)
+    let (requester_id, read_mask, write_mask) = match profile {
+        IfdProfile::V1Legacy | IfdProfile::V1_5Intermediate => {
+            // IFD v1 / Wellsburg (Legacy ICH8..Wildcat Point / Broadwell, 5-series..9-series)
+            // Bits 15:0 = Requester ID
+            // Bits 23:16 = Read access mask (regions 0..7)
+            // Bits 31:24 = Write access mask (regions 0..7)
+            let req_id = (flmstr & 0xFFFF) as u16;
+            let r_mask = ((flmstr >> 16) & 0xFF) as u16;
+            let w_mask = ((flmstr >> 24) & 0xFF) as u16;
+            (Some(req_id), r_mask, w_mask)
+        }
+        IfdProfile::V2Modern => {
+            // IFD v2 (Modern Skylake / Sunrise Point 100-series through 700-series)
+            // Bits 19:8 = Read access mask (regions 0..11)
+            // Bits 31:20 = Write access mask (regions 0..11)
+            let mut r_mask = ((flmstr >> 8) & 0xFFF) as u16;
+            let mut w_mask = ((flmstr >> 20) & 0xFFF) as u16;
+            // Extended regions 12..15 in Cannon Lake+
+            r_mask |= ((flmstr & 0x0F) as u16) << 12;
+            w_mask |= (((flmstr >> 4) & 0x0F) as u16) << 12;
+            (None, r_mask, w_mask)
+        }
+        IfdProfile::Unknown => {
+            // UNKNOWN profile preserves raw register without assigning permissions (DEF-26)
+            (None, 0, 0)
+        }
     };
 
     MasterAccessRule {
@@ -397,62 +465,145 @@ pub fn decode_master_rule(
     decode_master_rule_with_profile(master_id, master_name, flmstr, profile)
 }
 
-/// Detects descriptor profile from verified register characteristics without heuristic region counting (DEF-15).
+/// Evidence-backed profile resolution based on verified descriptor characteristics (DEF-25).
+pub fn detect_ifd_profile_resolution(
+    flmap0: u32,
+    flmap1: u32,
+    _flmap2: u32,
+    flcomp: Option<u32>,
+    flmstr1: Option<u32>,
+    profile_override: Option<IfdProfile>,
+) -> ProfileResolution {
+    let fcba = ((flmap0 & 0xFF) as usize) << 4;
+    let frba = (((flmap0 >> 16) & 0xFF) as usize) << 4;
+    // FLMAP0 NR field is strictly bits 26:24 (3 bits, DEF-25.2). Bit 27 is reserved!
+    let nr_bits = ((flmap0 >> 24) & 0x07) as usize;
+    let legacy_nr_count = nr_bits.saturating_add(1);
+
+    let fmba = ((flmap1 & 0xFF) as usize) << 4;
+    let fpsba = (((flmap1 >> 16) & 0xFF) as usize) << 4;
+    let isl = ((flmap1 >> 24) & 0xFF) as usize;
+
+    let geom_regions = max_regions_from_geometry(fcba, fmba, frba, fpsba);
+
+    // If caller provided an explicit override, honor it with Confirmed confidence and UserOverride provenance
+    if let Some(override_profile) = profile_override {
+        let max_regions = match override_profile {
+            IfdProfile::V1Legacy => std::cmp::min(geom_regions.max(1), 5),
+            IfdProfile::V1_5Intermediate => std::cmp::min(geom_regions.max(1), 8),
+            IfdProfile::V2Modern => std::cmp::min(geom_regions.max(1), 16),
+            IfdProfile::Unknown => geom_regions.min(16),
+        };
+        return ProfileResolution {
+            profile: override_profile,
+            confidence: if override_profile == IfdProfile::Unknown {
+                ProfileConfidence::Unknown
+            } else {
+                ProfileConfidence::Confirmed
+            },
+            source: ProfileSource::UserOverride,
+            max_regions,
+        };
+    }
+
+    if geom_regions == 0 {
+        return ProfileResolution {
+            profile: IfdProfile::Unknown,
+            confidence: ProfileConfidence::Unknown,
+            source: ProfileSource::AutoDetected,
+            max_regions: 0,
+        };
+    }
+
+    // Inspect FLMSTR1 shift evidence if available
+    let (flmstr1_legacy_evidence, flmstr1_modern_evidence) = if let Some(m1) = flmstr1 {
+        let v1_rd = (m1 >> 16) & 0xFF;
+        let v1_wr = (m1 >> 24) & 0xFF;
+        let v2_rd = (m1 >> 8) & 0xFFF;
+        let v2_wr = (m1 >> 20) & 0xFFF;
+
+        // Legacy has Write in 31:24, Read in 23:16, Requester ID in 15:0
+        let legacy_match = (v1_rd != 0 || v1_wr != 0) && (m1 & 0x0000FF00) == 0;
+        // Modern has Write in 31:20, Read in 19:8, Requester ID dropped (bits 7:0 are 0)
+        let modern_match = (v2_rd != 0 || v2_wr != 0) && (m1 & 0xFF) == 0;
+        (legacy_match, modern_match)
+    } else {
+        (false, false)
+    };
+
+    // Inspect read frequency: 17 MHz (value 6) is unique to modern Skylake+ (DEF-25)
+    let freq_read_17mhz = if let Some(comp) = flcomp {
+        ((comp >> 17) & 0x07) == 6
+    } else {
+        false
+    };
+
+    // Modern candidate (IFD v2): geometry fits >= 10 regions, extended straps, or modern master/frequency
+    if geom_regions >= 10 {
+        let mut modern_indicators = 0usize;
+        if freq_read_17mhz { modern_indicators += 1; }
+        if isl >= 0x30 { modern_indicators += 1; }
+        if flmstr1_modern_evidence { modern_indicators += 1; }
+
+        if modern_indicators >= 2 || freq_read_17mhz {
+            return ProfileResolution {
+                profile: IfdProfile::V2Modern,
+                confidence: ProfileConfidence::Confirmed,
+                source: ProfileSource::AutoDetected,
+                max_regions: geom_regions.min(16),
+            };
+        } else if isl >= 0x20 || flmstr1_modern_evidence {
+            return ProfileResolution {
+                profile: IfdProfile::V2Modern,
+                confidence: ProfileConfidence::Probable,
+                source: ProfileSource::AutoDetected,
+                max_regions: geom_regions.min(16),
+            };
+        }
+    }
+
+    // Legacy candidate (IFD v1): geometry fits <= 8 regions, NR in 26:24 is <= 4, compact straps <= 25
+    if geom_regions <= 8 && nr_bits <= 4 && isl <= 25 {
+        let mut legacy_indicators = 0usize;
+        if isl <= 21 { legacy_indicators += 1; }
+        if flmstr1_legacy_evidence { legacy_indicators += 1; }
+
+        let max_reg = std::cmp::min(geom_regions, legacy_nr_count);
+        if legacy_indicators >= 1 {
+            return ProfileResolution {
+                profile: IfdProfile::V1Legacy,
+                confidence: ProfileConfidence::Confirmed,
+                source: ProfileSource::AutoDetected,
+                max_regions: max_reg,
+            };
+        } else {
+            return ProfileResolution {
+                profile: IfdProfile::V1Legacy,
+                confidence: ProfileConfidence::Probable,
+                source: ProfileSource::AutoDetected,
+                max_regions: max_reg,
+            };
+        }
+    }
+
+    // Ambiguous evidence -> Unknown profile with Unknown confidence
+    ProfileResolution {
+        profile: IfdProfile::Unknown,
+        confidence: ProfileConfidence::Unknown,
+        source: ProfileSource::AutoDetected,
+        max_regions: geom_regions.min(16),
+    }
+}
+
+/// Backwards-compatible profile detector returning just `IfdProfile`.
 pub fn detect_ifd_profile(
     flmap0: u32,
-    _flmap1: u32,
+    flmap1: u32,
     flmap2: u32,
     flcomp: Option<u32>,
     flmstr1: Option<u32>,
 ) -> IfdProfile {
-    let nr_field = ((flmap0 >> 24) & 0x0F) as u8;
-    let iccriba = ((flmap2 >> 16) & 0xFF) as u8;
-
-    // Check FLMSTR1 shift characteristics
-    if let Some(m1) = flmstr1 {
-        let v2_read_bits = (m1 >> 8) & 0xFFF;
-        let v1_read_bits = (m1 >> 16) & 0xFF;
-
-        // If ICCRIBA indicates 100-series (0x31) or 300-series+ (0x34)
-        if iccriba >= 0x31 {
-            return IfdProfile::V2Modern;
-        }
-
-        // Distinct v2 master shift (rd_shift = 8, wr_shift = 20) with 0 in requester ID bits 7:0
-        if v2_read_bits != 0 && (m1 & 0xFF) == 0 && (m1 & 0x00FF0000) == 0 {
-            return IfdProfile::V2Modern;
-        }
-
-        // Distinct v1 master shift (rd_shift = 16, wr_shift = 24)
-        if v1_read_bits != 0 && (m1 & 0x0000FF00) == 0 && nr_field <= 4 {
-            return IfdProfile::V1Legacy;
-        }
-    }
-
-    // Check FLCOMP read frequency: in Skylake+, freq_read = 6 (17 MHz)
-    if let Some(comp) = flcomp {
-        let freq_read = ((comp >> 17) & 0x07) as u8;
-        if freq_read == 6 {
-            return IfdProfile::V2Modern;
-        }
-    }
-
-    // Standard IFD v1 detection: NR <= 4 (1..5 regions), ICCRIBA < 0x31
-    if nr_field <= 4 && iccriba < 0x31 {
-        return IfdProfile::V1Legacy;
-    }
-
-    // IFD v1.5 intermediate (8 regions, Wellsburg / C610)
-    if nr_field == 7 {
-        return IfdProfile::V1_5Intermediate;
-    }
-
-    // Modern 16-region descriptors (NR = 15 or dropped field with high strap counts)
-    if nr_field >= 9 {
-        return IfdProfile::V2Modern;
-    }
-
-    IfdProfile::Unknown
+    detect_ifd_profile_resolution(flmap0, flmap1, flmap2, flcomp, flmstr1, None).profile
 }
 
 pub struct IntelFlashDescriptor;
@@ -506,16 +657,18 @@ impl IntelFlashDescriptor {
                     platform_family: "UNCLASSIFIED".to_string(),
                     descriptor_version: "Unknown".to_string(),
                     profile: IfdProfile::Unknown,
+                    confidence: ProfileConfidence::Unknown,
+                    profile_source: ProfileSource::AutoDetected,
                     region_count: 0,
                     enabled_regions: Vec::new(),
                     compatibility_notes: vec!["Cannot evaluate platform without valid IFD".to_string()],
                 },
                 gate3_programmer: Gate3ProgrammerCompatibility {
-                    status: ProgrammerCompatibilityStatus::Incompatible,
+                    status: ProgrammerCompatibilityStatus::Indeterminate,
                     passed: false,
-                    detected_chip_size_bytes: image_size,
-                    detected_chip_size_mb: image_size as f64 / (1024.0 * 1024.0),
-                    host_flashing_locked: true,
+                    descriptor_inferred_flash_capacity_bytes: image_size,
+                    descriptor_inferred_flash_capacity_mb: image_size as f64 / (1024.0 * 1024.0),
+                    host_descriptor_write_disabled: true,
                     host_descriptor_bios_write_allowed: false,
                     runtime_chipset_lock_status: RuntimeChipsetLockStatus::Indeterminate,
                     hardware_evidence_present: false,
@@ -532,8 +685,8 @@ impl IntelFlashDescriptor {
         let nc = (((flmap0 >> 8) & 0x03) as u8).saturating_add(1);
         let frba_field = ((flmap0 >> 16) & 0xFF) as usize;
         let frba = frba_field << 4;
-        let nr_field = ((flmap0 >> 24) & 0x0F) as u8;
-        let nr = nr_field.saturating_add(1);
+        // FLMAP0 NR field is strictly bits 26:24 (3 bits, DEF-25.2). Bit 27 is reserved!
+        let _nr_field = ((flmap0 >> 24) & 0x07) as u8;
 
         // 3. Read FLMAP1 at offset 0x18
         let flmap1 = reader.read_u32_le(0x18)?;
@@ -558,10 +711,11 @@ impl IntelFlashDescriptor {
             None
         };
 
-        // 5. Resolve Profile (DEF-15)
-        let profile = profile_override.unwrap_or_else(|| {
-            detect_ifd_profile(flmap0, flmap1, flmap2, raw_flcomp, raw_flmstr1)
-        });
+        // 5. Resolve Profile (DEF-15, DEF-25)
+        let resolution = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, raw_flcomp, raw_flmstr1, profile_override);
+        let profile = resolution.profile;
+        let profile_confidence = resolution.confidence;
+        let profile_source = resolution.source;
 
         let mut issues = Vec::new();
 
@@ -622,7 +776,7 @@ impl IntelFlashDescriptor {
 
             let desc_version_str = match profile {
                 IfdProfile::V1Legacy => "IFD v1.0 (Legacy ICH8..Wildcat Point / Broadwell)".to_string(),
-                IfdProfile::V1_5Intermediate => "IFD v1.5 (Intermediate / Wellsburg C610)".to_string(),
+                IfdProfile::V1_5Intermediate => "IFD v1.5 (Provisional / Wellsburg C610)".to_string(),
                 IfdProfile::V2Modern => "IFD v2.0 (Modern Skylake 100-series..Raptor/Meteor Lake)".to_string(),
                 IfdProfile::Unknown => "IFD Unknown / Unclassified Layout".to_string(),
             };
@@ -643,25 +797,30 @@ impl IntelFlashDescriptor {
             });
         }
 
-        // 8. Parse Flash Regions at FRBA (Profile-aware decoding DEF-16)
-        let max_regions = match profile {
-            IfdProfile::V1Legacy => (nr as usize).clamp(1, 5),
-            IfdProfile::V1_5Intermediate => 8,
-            IfdProfile::V2Modern | IfdProfile::Unknown => (nr as usize).clamp(5, 16),
+        // 8. Parse Flash Regions at FRBA (Profile-aware and geometry-bounded DEF-16, DEF-25)
+        let nr_bits = ((flmap0 >> 24) & 0x07) as usize;
+        let legacy_nr_count = nr_bits.saturating_add(1);
+        let effective_regions = if resolution.max_regions > 0 {
+            resolution.max_regions
+        } else if resolution.profile == IfdProfile::V1Legacy || resolution.profile == IfdProfile::Unknown {
+            legacy_nr_count
+        } else {
+            1
         };
 
+        let max_regions = resolution.max_regions;
         let mut regions = Vec::new();
         let mut region_table_in_bounds = true;
 
-        if frba + (max_regions * 4) > image_size {
+        if resolution.max_regions == 0 || frba + (effective_regions * 4) > image_size {
             region_table_in_bounds = false;
             issues.push(format!(
                 "Flash Region Base Address (0x{:X}) extends beyond image size (0x{:X})",
-                frba + (max_regions * 4),
+                frba + (effective_regions * 4),
                 image_size
             ));
         } else {
-            for id in 0..max_regions {
+            for id in 0..resolution.max_regions {
                 let reg_offset = frba + (id * 4);
                 if let Ok(reg_val) = reader.read_u32_le(reg_offset) {
                     let (base, limit, is_enabled) = decode_flreg_with_profile(reg_val, profile);
@@ -699,15 +858,15 @@ impl IntelFlashDescriptor {
                 "IFD v1.0 (Legacy Layout)".to_string(),
             ),
             IfdProfile::V1_5Intermediate => (
-                "Intel Wellsburg / C610 Enterprise PCH".to_string(),
-                "IFD v1.5 (8-Region Intermediate Layout)".to_string(),
+                "Intel Wellsburg / C610 Enterprise PCH (Provisional)".to_string(),
+                "IFD v1.5 (Provisional 8-Region Layout)".to_string(),
             ),
             IfdProfile::V2Modern => (
                 "Intel Modern PCH (100-Series through 700-Series / Meteor Lake)".to_string(),
-                "IFD v2.0 (Modern 16-Region Layout)".to_string(),
+                "IFD v2.0 (Modern Geometry-Bounded Layout)".to_string(),
             ),
             IfdProfile::Unknown => (
-                format!("Intel PCH (Unclassified, Region Count: {})", nr),
+                "Intel PCH (Unclassified / Unknown Profile)".to_string(),
                 "IFD Unknown / Unclassified".to_string(),
             ),
         };
@@ -716,6 +875,9 @@ impl IntelFlashDescriptor {
         compat_notes.push(format!("Detected Flash Components: {}", nc));
         compat_notes.push(format!("Detected Flash Masters: {}", nm));
         compat_notes.push(format!("Assigned Profile: {:?}", profile));
+        compat_notes.push(format!("Profile Confidence: {:?}", profile_confidence));
+        compat_notes.push(format!("Profile Source: {:?}", profile_source));
+        compat_notes.push(format!("Geometry Bounds Max Regions: {}", max_regions));
         if regions.iter().any(|r| r.region_type == RegionType::Me && r.enabled) {
             compat_notes.push("Intel Management Engine region present".to_string());
         }
@@ -723,7 +885,9 @@ impl IntelFlashDescriptor {
             compat_notes.push("BIOS/UEFI primary payload region present".to_string());
         }
 
-        // 11. Programmer Compatibility Gate (DEF-19)
+        let platform_passed = structural_passed && profile != IfdProfile::Unknown && profile_confidence != ProfileConfidence::Unknown;
+
+        // 11. Programmer Compatibility Gate (DEF-19, DEF-28, DEF-29)
         let fcba_total_capacity: usize = components_info
             .as_ref()
             .map(|c| c.components.iter().map(|d| d.density_bytes).sum())
@@ -746,7 +910,7 @@ impl IntelFlashDescriptor {
 
         let mut programmer_constraints = Vec::new();
         programmer_constraints.push(format!(
-            "Required SPI NOR flash capacity: {:.2} MB (0x{:X} bytes)",
+            "Descriptor-inferred SPI flash capacity estimate: {:.2} MB (0x{:X} bytes)",
             detected_capacity as f64 / (1024.0 * 1024.0),
             detected_capacity
         ));
@@ -755,12 +919,8 @@ impl IntelFlashDescriptor {
         programmer_constraints.push("Host-based access permissions are distinct from external SPI programmer compatibility; external programmers bypass PCH master permission masks.".to_string());
         programmer_constraints.push("Descriptor master permissions do not guarantee host or in-circuit writeability: hardware Protected Range registers (PR0..PR4) and BIOS_CNTL lock bits enforce independent hardware protections.".to_string());
 
-        let programmer_status = if !structural_passed || image_size < detected_capacity {
-            ProgrammerCompatibilityStatus::Incompatible
-        } else {
-            // Strictly Indeterminate without physical hardware telemetry
-            ProgrammerCompatibilityStatus::Indeterminate
-        };
+        // Gate 3 status remains strictly Indeterminate without physical hardware telemetry (DEF-29)
+        let programmer_status = ProgrammerCompatibilityStatus::Indeterminate;
 
         Ok(IfdAnalysisReport {
             image_size,
@@ -778,21 +938,23 @@ impl IntelFlashDescriptor {
                 issues,
             },
             gate2_platform: Gate2PlatformCompatibility {
-                passed: structural_passed,
+                passed: platform_passed,
                 platform_family,
                 descriptor_version,
                 profile,
-                region_count: nr as usize,
+                confidence: profile_confidence,
+                profile_source,
+                region_count: max_regions,
                 enabled_regions,
                 compatibility_notes: compat_notes,
             },
             gate3_programmer: Gate3ProgrammerCompatibility {
                 status: programmer_status,
                 passed: false, // Refuse speculative positive compatibility without hardware
-                detected_chip_size_bytes: detected_capacity,
-                detected_chip_size_mb: detected_capacity as f64 / (1024.0 * 1024.0),
-                host_flashing_locked: !host_descriptor_bios_write_allowed,
+                descriptor_inferred_flash_capacity_bytes: detected_capacity,
+                descriptor_inferred_flash_capacity_mb: detected_capacity as f64 / (1024.0 * 1024.0),
                 host_descriptor_bios_write_allowed,
+                host_descriptor_write_disabled: !host_descriptor_bios_write_allowed,
                 runtime_chipset_lock_status: RuntimeChipsetLockStatus::Indeterminate,
                 hardware_evidence_present: false,
                 required_voltage_volts: None,

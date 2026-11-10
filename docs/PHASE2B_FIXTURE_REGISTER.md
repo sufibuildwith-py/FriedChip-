@@ -30,27 +30,27 @@ fixtures/
 
 ## 2. Fixture Discovery Hierarchy
 
-Tests requiring real-world firmware resolve files using a deterministic, multi-level hierarchy:
+Tests requiring real-world firmware resolve files using a deterministic, multi-level hierarchy (DEF-30):
 
 ```mermaid
 flowchart TD
-    Start["Request Fixture: Latitude_5X90_1.41.0.exe"] --> EnvCheck{"FRIEDCHIP_FIXTURE_DIR<br/>set?"}
-    EnvCheck -- Yes --> CheckEnvPath["Check path in environment variable"]
-    EnvCheck -- No --> CheckLocal["Check fixtures/realworld/"]
-    CheckEnvPath --> Exists{"File Exists?"}
+    Start["Request Fixture: Latitude_5X90_1.41.0.exe"] --> FileEnvCheck{"FRIEDCHIP_FIXTURE_PATH or<br/>DELL_PFS_REALWORLD_FIXTURE set?"}
+    FileEnvCheck -- Yes --> CheckFilePath["Check explicit fixture file path"]
+    FileEnvCheck -- No --> DirEnvCheck{"FRIEDCHIP_FIXTURE_DIR or<br/>FRIEDCHIP_REALWORLD_FIXTURES_DIR set?"}
+    DirEnvCheck -- Yes --> CheckDirPath["Check path in fixture directory"]
+    DirEnvCheck -- No --> CheckLocal["Check fixtures/realworld/Latitude_5X90_1.41.0.exe"]
+    CheckFilePath --> Exists{"File Exists?"}
+    CheckDirPath --> Exists
     CheckLocal --> Exists
-    Exists -- No --> Fallback["Check parent scratch/ directories"]
-    Fallback --> Found{"File Found?"}
-    Found -- No --> SkipTest["Skip test with #[ignore] message:<br/>'Real-world OEM integration test requires...'"]
-    Found -- Yes --> CheckHash{"Pre-Flight SHA-256<br/>Matches Manifest?"}
-    Exists -- Yes --> CheckHash
+    Exists -- No --> SkipTest["Skip test with #[ignore] message:<br/>'Real-world OEM integration test requires...'"]
+    Exists -- Yes --> CheckHash{"Pre-Flight SHA-256<br/>Matches Canonical Manifest?"}
     CheckHash -- No --> HardFail["PANIC: Fixture Corrupted or Altered!"]
     CheckHash -- Yes --> ExecTest["Execute Integration Test"]
 ```
 
 ### Pre-Flight Verification Semantics
 - **Missing Fixture**: Cleanly skipped using native Rust `#[ignore = "..."]` attributes during standard `cargo test` runs.
-- **Corrupted Fixture**: If a file exists at the resolved path but fails SHA-256 verification against the registered manifest, the test **panics immediately**. A corrupted fixture is never silently ignored.
+- **Corrupted Fixture**: If a file exists at the resolved path but fails SHA-256 verification against the canonical registered manifest (`fixtures/manifests/dell_latitude_5x90.json`), the test **panics immediately**. A corrupted fixture is never silently ignored.
 - **Integrity Guarantee**: Skipped tests are never counted as `REAL_WORLD_VERIFIED` in reports or release gates.
 
 ---
@@ -62,7 +62,7 @@ flowchart TD
 - **Manifest Path:** `fixtures/manifests/dell_latitude_5x90.json`
 - **Filename:** `Latitude_5X90_1.41.0.exe`
 - **Binary Size:** 13,662,488 bytes (13.03 MiB)
-- **SHA-256 Digest:** `90bdf7319ec4cb7605e55e373400a44cf1cfab9fa6600c8b3558fe32b0028e16`
+- **SHA-256 Digest:** `E24B8F8F719CCD8F8B8EBDC8A6178D89C15121DF6806F7E112020964484B840B`
 - **Vendor:** Dell Inc.
 - **Platform:** Dell Latitude 5490 / 5590 / 5290
 - **Chipset Family:** Intel 100/200/300-Series Mobile (Kaby Lake Refresh / Coffee Lake)
