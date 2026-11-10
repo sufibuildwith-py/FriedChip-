@@ -66,10 +66,11 @@ pub struct FlashRegion {
     pub id: u8,
     pub region_type: RegionType,
     pub name: String,
-    pub base: usize,
-    pub limit: usize,
-    pub size: usize,
-    pub enabled: bool,
+    pub flreg_raw: u32,
+    pub base: Option<usize>,
+    pub limit: Option<usize>,
+    pub size: Option<usize>,
+    pub enabled: Option<bool>,
     pub sha256: Option<String>,
 }
 
@@ -78,32 +79,58 @@ impl FlashRegion {
     ///
     /// Per Intel specification, if `limit < base`, the region is disabled/unmapped.
     pub fn from_raw_bounds(id: u8, base: usize, limit: usize) -> Self {
+        let is_enabled = limit >= base;
+        let flreg_raw = ((limit as u32 >> 12) << 16) | (base as u32 >> 12);
+        Self::from_decoded(id, flreg_raw, Some((base, limit, is_enabled)))
+    }
+
+    /// Create a new FlashRegion with explicit decoded bounds or None if profile is Unknown (DEF-36).
+    pub fn from_decoded(id: u8, flreg_raw: u32, bounds: Option<(usize, usize, bool)>) -> Self {
         let region_type = RegionType::from_id(id);
         let name = region_type.display_name().to_string();
 
-        if limit < base {
-            Self {
-                id,
-                region_type,
-                name,
-                base,
-                limit,
-                size: 0,
-                enabled: false,
-                sha256: None,
+        match bounds {
+            Some((base, limit, is_enabled)) => {
+                if !is_enabled || limit < base {
+                    Self {
+                        id,
+                        region_type,
+                        name,
+                        flreg_raw,
+                        base: Some(base),
+                        limit: Some(limit),
+                        size: Some(0),
+                        enabled: Some(false),
+                        sha256: None,
+                    }
+                } else {
+                    let size = limit.saturating_sub(base).saturating_add(1);
+                    Self {
+                        id,
+                        region_type,
+                        name,
+                        flreg_raw,
+                        base: Some(base),
+                        limit: Some(limit),
+                        size: Some(size),
+                        enabled: Some(true),
+                        sha256: None,
+                    }
+                }
             }
-        } else {
-            // Region is inclusive: size = limit - base + 1
-            let size = limit.saturating_sub(base).saturating_add(1);
-            Self {
-                id,
-                region_type,
-                name,
-                base,
-                limit,
-                size,
-                enabled: true,
-                sha256: None,
+            None => {
+                // Profile is Unknown: withhold speculative addresses and enabled status (DEF-36)
+                Self {
+                    id,
+                    region_type,
+                    name,
+                    flreg_raw,
+                    base: None,
+                    limit: None,
+                    size: None,
+                    enabled: None,
+                    sha256: None,
+                }
             }
         }
     }
@@ -127,28 +154,38 @@ pub fn validate_region_boundaries(
     let mut conflicts = Vec::new();
     let mut warnings = Vec::new();
 
-    let enabled: Vec<&FlashRegion> = regions.iter().filter(|r| r.enabled).collect();
+    let enabled: Vec<(&FlashRegion, usize, usize)> = regions
+        .iter()
+        .filter_map(|r| {
+            if r.enabled == Some(true) {
+                if let (Some(base), Some(limit)) = (r.base, r.limit) {
+                    return Some((r, base, limit));
+                }
+            }
+            None
+        })
+        .collect();
 
     // Check bounds against image length
-    for r in &enabled {
-        if r.limit >= image_len {
+    for (r, base, limit) in &enabled {
+        if *limit >= image_len {
             warnings.push(format!(
                 "Region '{}' limit (0x{:X}) exceeds total image size (0x{:X})",
-                r.name, r.limit, image_len
+                r.name, limit, image_len
             ));
         }
 
         // Check 4KB page alignment
-        if r.base % 0x1000 != 0 {
+        if base % 0x1000 != 0 {
             warnings.push(format!(
                 "Region '{}' base address 0x{:X} is not 4KB page aligned",
-                r.name, r.base
+                r.name, base
             ));
         }
-        if (r.limit + 1) % 0x1000 != 0 {
+        if (limit + 1) % 0x1000 != 0 {
             warnings.push(format!(
                 "Region '{}' limit address 0x{:X} is not 4KB page aligned",
-                r.name, r.limit
+                r.name, limit
             ));
         }
     }
@@ -156,20 +193,20 @@ pub fn validate_region_boundaries(
     // Check pairwise overlap
     for i in 0..enabled.len() {
         for j in (i + 1)..enabled.len() {
-            let r1 = enabled[i];
-            let r2 = enabled[j];
+            let (r1, base1, limit1) = enabled[i];
+            let (r2, base2, limit2) = enabled[j];
 
-            // If r1.base <= r2.limit and r2.base <= r1.limit -> overlapping
-            if r1.base <= r2.limit && r2.base <= r1.limit {
-                let overlap_start = r1.base.max(r2.base);
-                let overlap_end = r1.limit.min(r2.limit);
+            // If base1 <= limit2 and base2 <= limit1 -> overlapping
+            if base1 <= limit2 && base2 <= limit1 {
+                let overlap_start = base1.max(base2);
+                let overlap_end = limit1.min(limit2);
                 let overlap_bytes = overlap_end.saturating_sub(overlap_start).saturating_add(1);
 
                 conflicts.push(BoundaryConflict {
                     region1_name: r1.name.clone(),
-                    region1_bounds: (r1.base, r1.limit),
+                    region1_bounds: (base1, limit1),
                     region2_name: r2.name.clone(),
-                    region2_bounds: (r2.base, r2.limit),
+                    region2_bounds: (base2, limit2),
                     overlap_bytes,
                 });
             }
