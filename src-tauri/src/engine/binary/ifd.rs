@@ -27,6 +27,7 @@ pub enum IfdProfile {
 pub enum ProfileConfidence {
     Confirmed,
     Probable,
+    UserSelected,
     Unknown,
 }
 
@@ -101,28 +102,48 @@ pub fn decode_spi_frequency_mhz(bits: u8) -> u32 {
     decode_spi_frequency(bits, IfdProfile::V1Legacy).mhz_or_zero()
 }
 
-/// Validated descriptor geometry structure (DEF-37).
+/// Validated descriptor geometry structure (DEF-37, DEF-42, DEF-43).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DescriptorGeometry {
     pub raw_flmap0: u32,
     pub raw_flmap1: u32,
     pub raw_flmap2: u32,
     pub fcba: usize,
+    pub fcba_raw: u8,
     pub nc: u8,
     pub frba: usize,
+    pub frba_raw: u8,
     pub nr_raw: u8,
     pub fmba: usize,
+    pub fmba_raw: u8,
     pub nm: u8,
     pub fpsba: Option<usize>,
+    pub fpsba_raw: u8,
     pub isl: u8,
     pub fmsba: Option<usize>,
+    pub fmsba_raw: u8,
     pub msl: u8,
+    pub iccriba: Option<usize>,
+    pub iccriba_raw: u8,
+    pub ril: u8,
     pub max_regions_extent: usize,
     pub is_valid: bool,
     pub validation_errors: Vec<String>,
+    pub validation_notes: Vec<String>,
 }
 
-/// Validates descriptor geometry before table traversal (DEF-37).
+/// Helper representing an active descriptor section interval for checked collision analysis (DEF-43).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct SectionExtent {
+    name: &'static str,
+    start: usize,
+    len: usize,
+    end: usize,
+    is_known_length: bool,
+}
+
+/// Validates descriptor geometry before table traversal (DEF-37, DEF-42, DEF-43).
 pub fn validate_descriptor_geometry(
     flmap0: u32,
     flmap1: u32,
@@ -130,83 +151,123 @@ pub fn validate_descriptor_geometry(
     image_size: usize,
 ) -> DescriptorGeometry {
     let mut errors = Vec::new();
+    let mut notes = Vec::new();
 
-    let fcba = ((flmap0 & 0xFF) as usize) << 4;
+    // 1. Decode raw register fields per Intel SPI Programming Guides & flashrom ich_descriptors.h
+    let fcba_raw = (flmap0 & 0xFF) as u8;
+    let fcba = (fcba_raw as usize) << 4;
     let nc = (((flmap0 >> 8) & 0x03) as u8).saturating_add(1);
-    let frba = (((flmap0 >> 16) & 0xFF) as usize) << 4;
+
+    let frba_raw = ((flmap0 >> 16) & 0xFF) as u8;
+    let frba = (frba_raw as usize) << 4;
     let nr_raw = ((flmap0 >> 24) & 0x07) as u8;
 
-    let fmba = ((flmap1 & 0xFF) as usize) << 4;
+    let fmba_raw = (flmap1 & 0xFF) as u8;
+    let fmba = (fmba_raw as usize) << 4;
     let nm = (((flmap1 >> 8) & 0x07) as u8).saturating_add(1);
-    let fpsba_field = ((flmap1 >> 16) & 0xFF) as usize;
-    let fpsba = if fpsba_field != 0 { Some(fpsba_field << 4) } else { None };
+
+    let fpsba_raw = ((flmap1 >> 16) & 0xFF) as u8;
+    let fpsba = if fpsba_raw != 0 { Some((fpsba_raw as usize) << 4) } else { None };
     let isl = ((flmap1 >> 24) & 0xFF) as u8;
 
-    let fmsba_field = (flmap2 & 0xFF) as usize;
-    let fmsba = if fmsba_field != 0 { Some(fmsba_field << 4) } else { None };
+    let fmsba_raw = (flmap2 & 0xFF) as u8;
+    let fmsba = if fmsba_raw != 0 { Some((fmsba_raw as usize) << 4) } else { None };
     let msl = ((flmap2 >> 8) & 0xFF) as u8;
 
-    // 1. Check mandatory sections within valid descriptor boundaries [0x20..0x1000]
-    if fcba < 0x20 || fcba >= 0x1000 {
-        errors.push(format!("FCBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", fcba));
-    }
-    if frba < 0x20 || frba >= 0x1000 {
-        errors.push(format!("FRBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", frba));
-    }
-    if fmba < 0x20 || fmba >= 0x1000 {
-        errors.push(format!("FMBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", fmba));
-    }
+    let iccriba_raw = ((flmap2 >> 16) & 0xFF) as u8;
+    let iccriba = if iccriba_raw != 0 { Some((iccriba_raw as usize) << 4) } else { None };
+    let ril = ((flmap2 >> 24) & 0xFF) as u8;
 
-    // 2. Check collisions between mandatory sections
-    if fcba == frba {
-        errors.push("Collision: FCBA overlaps FRBA at identical offset".to_string());
-    }
-    if fcba == fmba {
-        errors.push("Collision: FCBA overlaps FMBA at identical offset".to_string());
-    }
-    if frba == fmba {
-        errors.push("Collision: FRBA overlaps FMBA at identical offset".to_string());
-    }
+    // 2. Assemble active sections with checked arithmetic extents (DEF-43)
+    // Mandatory: FCBA (min 12 bytes: FLCOMP + Component 2/VSCC registers)
+    let fcba_len = 12usize;
+    // Mandatory: FRBA (min 4 bytes: at least region 0)
+    let frba_len = 4usize;
+    // Mandatory: FMBA (nm * 4 bytes)
+    let fmba_len = match (nm as usize).checked_mul(4) {
+        Some(l) => l.max(4),
+        None => 4,
+    };
 
-    // 3. Check optional sections
+    let mut active_sections: Vec<SectionExtent> = Vec::new();
+
+    // Helper to safely append an active section checking for arithmetic overflow and bounds
+    let mut add_active_section = |name: &'static str, start: usize, len: usize, is_known: bool, errs: &mut Vec<String>| {
+        if start < 0x20 || start >= 0x1000 {
+            errs.push(format!("{} (0x{:X}) is out of descriptor bounds [0x20..0x1000]", name, start));
+            return;
+        }
+        match start.checked_add(len) {
+            Some(end) => {
+                if end > 0x1000 {
+                    errs.push(format!(
+                        "{} at 0x{:X} with length {} extends beyond descriptor block boundary 0x1000 (end: 0x{:X})",
+                        name, start, len, end
+                    ));
+                } else {
+                    active_sections.push(SectionExtent {
+                        name,
+                        start,
+                        len,
+                        end,
+                        is_known_length: is_known,
+                    });
+                }
+            }
+            None => {
+                errs.push(format!("{} at 0x{:X} arithmetic overflow calculating extent length {}", name, start, len));
+            }
+        }
+    };
+
+    add_active_section("FCBA", fcba, fcba_len, true, &mut errors);
+    add_active_section("FRBA", frba, frba_len, false, &mut errors);
+    add_active_section("FMBA", fmba, fmba_len, true, &mut errors);
+
     if let Some(p) = fpsba {
-        if p < 0x20 || p >= 0x1000 {
-            errors.push(format!("FPSBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", p));
-        }
-        if p == frba {
-            errors.push("Collision: FPSBA overlaps FRBA at identical offset".to_string());
-        }
+        let fpsba_len = if isl > 0 { match (isl as usize).checked_mul(4) { Some(l) => l, None => 4 } } else { 4 };
+        add_active_section("FPSBA", p, fpsba_len, isl > 0, &mut errors);
     }
     if let Some(m) = fmsba {
-        if m < 0x20 || m >= 0x1000 {
-            errors.push(format!("FMSBA (0x{:X}) is out of descriptor bounds [0x20..0x1000]", m));
-        }
-        if m == frba {
-            errors.push("Collision: FMSBA overlaps FRBA at identical offset".to_string());
+        let fmsba_len = if msl > 0 { match (msl as usize).checked_mul(4) { Some(l) => l, None => 4 } } else { 4 };
+        add_active_section("FMSBA", m, fmsba_len, msl > 0, &mut errors);
+    }
+    if let Some(i) = iccriba {
+        let iccriba_len = if ril > 0 { match (ril as usize).checked_mul(4) { Some(l) => l, None => 4 } } else { 4 };
+        add_active_section("ICCRIBA", i, iccriba_len, ril > 0, &mut errors);
+    }
+
+    // 3. Pairwise interval collision check between every active section pair (DEF-43)
+    let n_active = active_sections.len();
+    for i in 0..n_active {
+        for j in (i + 1)..n_active {
+            let a = &active_sections[i];
+            let b = &active_sections[j];
+            // Intervals [start, end) overlap if a.start < b.end && b.start < a.end
+            if a.start < b.end && b.start < a.end {
+                errors.push(format!(
+                    "Collision: {} overlaps {} (0x{:X}..0x{:X} overlaps with 0x{:X}..0x{:X})",
+                    a.name, b.name, a.start, a.end, b.start, b.end
+                ));
+            }
         }
     }
 
-    // 4. Check that sections starting before FRBA do not extend into FRBA
-    // Component section requires minimum 12 bytes
-    if fcba < frba && fcba.saturating_add(12) > frba {
-        errors.push(format!("Component section at 0x{:X} extends into region table at 0x{:X}", fcba, frba));
-    }
-    // Master section requires at least nm * 4 bytes
-    let master_bytes = (nm as usize).saturating_mul(4);
-    if fmba < frba && fmba.saturating_add(master_bytes) > frba {
-        errors.push(format!("Master section at 0x{:X} extends into region table at 0x{:X}", fmba, frba));
-    }
-
-    // 5. Derive maximum region extent from the nearest succeeding section or FLUMAP1 (0x0EFC)
-    const FLUMAP1_OFFSET: usize = 0x0EFC; // 3836
+    // 4. Derive maximum safe region table extent bounded by next succeeding section or FLUMAP1 (DEF-42, DEF-43)
+    const FLUMAP1_OFFSET: usize = 0x0EFC; // 3836 bytes (IFD_SIZE - 256 - 4)
     let mut succeeding_offsets = vec![FLUMAP1_OFFSET];
-    if fcba > frba { succeeding_offsets.push(fcba); }
-    if fmba > frba { succeeding_offsets.push(fmba); }
-    if let Some(p) = fpsba { if p > frba { succeeding_offsets.push(p); } }
-    if let Some(m) = fmsba { if m > frba { succeeding_offsets.push(m); } }
+
+    for s in &active_sections {
+        if s.start > frba {
+            succeeding_offsets.push(s.start);
+        }
+    }
 
     let next_boundary = succeeding_offsets.into_iter().min().unwrap_or(FLUMAP1_OFFSET);
-    let available_bytes = next_boundary.saturating_sub(frba);
+    let available_bytes = match next_boundary.checked_sub(frba) {
+        Some(diff) => diff,
+        None => 0,
+    };
 
     let max_regions_extent = if frba >= FLUMAP1_OFFSET || available_bytes < 4 {
         0
@@ -215,8 +276,30 @@ pub fn validate_descriptor_geometry(
     };
 
     if max_regions_extent == 0 && errors.is_empty() {
-        errors.push(format!("FRBA at 0x{:X} has zero available space before next boundary 0x{:X}", frba, next_boundary));
+        errors.push(format!(
+            "FRBA at 0x{:X} has zero available space before next boundary 0x{:X}",
+            frba, next_boundary
+        ));
     }
+
+    // Check if declared legacy NR extends beyond next boundary
+    let declared_regions = (nr_raw as usize).saturating_add(1);
+    if let Some(table_end) = frba.checked_add(declared_regions * 4) {
+        if table_end > next_boundary && errors.is_empty() {
+            errors.push(format!(
+                "Region table with {} declared regions (0x{:X}..0x{:X}) extends into succeeding section at 0x{:X}",
+                declared_regions, frba, table_end, next_boundary
+            ));
+        }
+    }
+
+    // Document validated sections and conservative assumptions
+    notes.push(format!("FCBA validated with 12-byte component header at 0x{:X}", fcba));
+    notes.push(format!("FMBA validated with {} masters ({} bytes) at 0x{:X}", nm, fmba_len, fmba));
+    if let Some(p) = fpsba { notes.push(format!("FPSBA present at 0x{:X} (ISL={})", p, isl)); }
+    if let Some(m) = fmsba { notes.push(format!("FMSBA present at 0x{:X} (MSL={})", m, msl)); }
+    if let Some(i) = iccriba { notes.push(format!("ICCRIBA present at 0x{:X} (RIL={})", i, ril)); }
+    notes.push(format!("Safe region extent bounded at {} regions before boundary 0x{:X}", max_regions_extent, next_boundary));
 
     let is_valid = errors.is_empty() && max_regions_extent > 0 && frba < image_size;
 
@@ -225,18 +308,27 @@ pub fn validate_descriptor_geometry(
         raw_flmap1: flmap1,
         raw_flmap2: flmap2,
         fcba,
+        fcba_raw,
         nc,
         frba,
+        frba_raw,
         nr_raw,
         fmba,
+        fmba_raw,
         nm,
         fpsba,
+        fpsba_raw,
         isl,
         fmsba,
+        fmsba_raw,
         msl,
+        iccriba,
+        iccriba_raw,
+        ril,
         max_regions_extent,
         is_valid,
         validation_errors: errors,
+        validation_notes: notes,
     }
 }
 
@@ -683,7 +775,7 @@ pub fn detect_ifd_profile_resolution(
                 indicators.push("Explicit user override: V1Legacy".to_string());
                 return ProfileResolution {
                     profile: IfdProfile::V1Legacy,
-                    confidence: ProfileConfidence::Confirmed,
+                    confidence: ProfileConfidence::UserSelected, // DEF-46: never Confirmed without independent evidence
                     source: ProfileSource::UserOverride,
                     max_regions: std::cmp::min(max_regions.max(1), nr_count.clamp(1, 5)),
                     indicators,
@@ -693,7 +785,7 @@ pub fn detect_ifd_profile_resolution(
                 indicators.push("Explicit user override: V2Modern".to_string());
                 return ProfileResolution {
                     profile: IfdProfile::V2Modern,
-                    confidence: ProfileConfidence::Confirmed,
+                    confidence: ProfileConfidence::UserSelected, // DEF-46: never Confirmed without independent evidence
                     source: ProfileSource::UserOverride,
                     max_regions: max_regions.min(16),
                     indicators,
@@ -703,7 +795,7 @@ pub fn detect_ifd_profile_resolution(
                 indicators.push("Explicit user override: Unknown".to_string());
                 return ProfileResolution {
                     profile: IfdProfile::Unknown,
-                    confidence: ProfileConfidence::Unknown,
+                    confidence: ProfileConfidence::UserSelected, // DEF-46
                     source: ProfileSource::UserOverride,
                     max_regions,
                     indicators,
@@ -723,39 +815,52 @@ pub fn detect_ifd_profile_resolution(
         };
     }
 
-    // 3. Inspect binary indicators for IFD v2 (Modern) vs IFD v1 (Legacy)
-    // Upstream evidence from Intel EDS and flashrom:
-    // Read frequency 6 (17 MHz) in FLCOMP[19:17] is unique to Skylake+ (DEF-25, DEF-34)
+    // 3. Inspect binary indicators for IFD v2 (Modern) vs IFD v1 (Legacy) (DEF-41)
+    // Upstream flashrom & coreboot evidence:
+    // - freq_read == 6 (17 MHz) was reserved on pre-Skylake and used on Skylake 100-series,
+    //   but is repurposed on 300-series Cannon Point and newer. It is NOT standalone V2 proof.
+    // - NR field in FLMAP0[26:24]: In legacy, 0..4 defines 1..5 regions. In modern, NR is dropped/reserved (often 0).
+    //   A zero field independently proves neither generation.
     let freq_read = flcomp.map(|comp| ((comp >> 17) & 0x07) as u8);
     let is_17mhz_read = freq_read == Some(6);
+    let is_legacy_freq = match freq_read {
+        Some(0) | Some(1) | Some(2) | Some(4) => true,
+        _ => false,
+    };
 
-    // FLMAP0 NR field: bits 26:24
     let nr_bits = geometry.nr_raw;
-    let is_dropped_nr = nr_bits == 0;
-    let is_valid_legacy_nr = nr_bits <= 4; // 1 to 5 regions
+    let is_valid_legacy_nr = nr_bits <= 4; // 0..4 indicates 1..5 regions
 
     // FLMSTR1 format evidence:
+    // In legacy FLMSTR1:
+    //   - Host CPU reads Descriptor at bit 16 and BIOS at bit 17
+    //   - Bits [15:0] is Requester ID (e.g. 0x0000, 0x0002)
+    //   - Bits [23:21] and [31:29] are strictly reserved zero (0xE0E00000)
+    // In modern FLMSTR1:
+    //   - Host CPU reads Descriptor at bit 8 and BIOS at bit 9
+    //   - Bits [15:0] is the 16-bit read mask (not Requester ID)
     let (is_modern_flmstr, is_legacy_flmstr) = if let Some(m1) = flmstr1 {
-        // Modern FLMSTR1: Requester ID dropped (bits 7:0 are 0),
-        // Read in 19:8, Write in 31:20. Modern permissions present in bits 19:16 or 31:28.
-        let modern_rd = (m1 >> 8) & 0x0FFF;
-        let modern_wr = (m1 >> 20) & 0x0FFF;
-        let modern_match = (m1 & 0xFF) == 0 && (modern_rd != 0 || modern_wr != 0);
+        let modern_rd_desc = (m1 & (1 << 8)) != 0;
+        let modern_rd_bios = (m1 & (1 << 9)) != 0;
+        let modern_match = modern_rd_desc && modern_rd_bios;
 
-        // Legacy FLMSTR1: Requester ID in bits 15:0,
-        // Read in 23:16, Write in 31:24.
-        let legacy_rd = (m1 >> 16) & 0xFF;
-        let legacy_wr = (m1 >> 24) & 0xFF;
-        let legacy_match = legacy_rd != 0 || legacy_wr != 0;
+        let legacy_rd_desc = (m1 & (1 << 16)) != 0;
+        let legacy_rd_bios = (m1 & (1 << 17)) != 0;
+        let legacy_reserved_zero = (m1 & 0xE0E00000) == 0;
+        let legacy_match = legacy_rd_desc && legacy_rd_bios && legacy_reserved_zero;
+
         (modern_match, legacy_match)
     } else {
         (false, false)
     };
 
     // Modern profile criteria (Skylake+):
-    // 17 MHz read clock OR (dropped NR + modern FLMSTR bit layout)
-    if is_17mhz_read || (is_dropped_nr && is_modern_flmstr) {
-        indicators.push("Detected modern Skylake+ indicators: 17MHz read clock or modern FLMSTR layout with dropped NR".to_string());
+    // Requires verified modern FLMSTR layout AND converging modern platform indicator
+    // (such as 17 MHz read clock, ICCRIBA > 0x30, or region table extent > 5)
+    // AND must NOT match legacy layout (prevents legacy Requester ID 0x0000 from triggering modern).
+    let has_modern_indicator = is_17mhz_read || geometry.iccriba_raw > 0x30 || max_regions > 5;
+    if is_modern_flmstr && has_modern_indicator && !is_legacy_flmstr {
+        indicators.push("Detected modern Skylake+ indicators: modern FLMSTR layout with converging modern platform indicator".to_string());
         return ProfileResolution {
             profile: IfdProfile::V2Modern,
             confidence: ProfileConfidence::Confirmed,
@@ -766,15 +871,11 @@ pub fn detect_ifd_profile_resolution(
     }
 
     // Legacy profile criteria (ICH8 through 9-Series):
-    // Valid legacy NR (<= 4) AND legacy FLMSTR layout AND read frequency is legacy (not 17 MHz)
-    let is_legacy_freq = match freq_read {
-        Some(0) | Some(1) | Some(2) | Some(4) => true,
-        _ => false,
-    };
-
-    if is_valid_legacy_nr && is_legacy_freq && is_legacy_flmstr && !is_17mhz_read {
+    // Requires verified legacy FLMSTR layout AND valid legacy NR (0..4) AND legacy frequency
+    // AND must NOT match modern layout.
+    if is_legacy_flmstr && is_valid_legacy_nr && is_legacy_freq && !is_17mhz_read && !is_modern_flmstr {
         let legacy_count = (nr_bits as usize).saturating_add(1);
-        indicators.push("Detected legacy ICH8..9-Series indicators: valid NR in range 1..5, legacy SPI frequency, legacy FLMSTR layout".to_string());
+        indicators.push("Detected legacy ICH8..9-Series indicators: valid legacy NR, legacy SPI frequency, legacy FLMSTR layout".to_string());
         return ProfileResolution {
             profile: IfdProfile::V1Legacy,
             confidence: ProfileConfidence::Confirmed,
@@ -784,8 +885,8 @@ pub fn detect_ifd_profile_resolution(
         };
     }
 
-    // Ambiguous evidence -> UNKNOWN (DEF-34: "Where binary evidence cannot establish a unique layout, return UNKNOWN")
-    indicators.push("Binary evidence is ambiguous or contradictory; speculative profile assignment withheld for safety".to_string());
+    // Ambiguous evidence -> UNKNOWN (DEF-34, DEF-41: "Where binary evidence cannot establish a unique layout, return UNKNOWN")
+    indicators.push("Binary evidence is ambiguous, conflicting, or unverified; speculative profile assignment withheld for safety".to_string());
     ProfileResolution {
         profile: IfdProfile::Unknown,
         confidence: ProfileConfidence::Unknown,
@@ -832,6 +933,8 @@ impl IntelFlashDescriptor {
         // 1. Signature check at offset 0x10
         let sig = reader.read_u32_le(IFD_SIGNATURE_OFFSET)?;
         let has_valid_sig = sig == IFD_SIGNATURE_MAGIC;
+        #[cfg(test)]
+        crate::engine::testing::observer::record_ifd_sig(has_valid_sig);
 
         if !has_valid_sig {
             return Ok(IfdAnalysisReport {
@@ -889,6 +992,8 @@ impl IntelFlashDescriptor {
 
         // 5. Pre-traversal Geometry Validation (DEF-37)
         let geometry = validate_descriptor_geometry(flmap0, flmap1, flmap2, image_size);
+        #[cfg(test)]
+        crate::engine::testing::observer::record_ifd_geom(geometry.is_valid);
         let mut issues = geometry.validation_errors.clone();
 
         let fcba = geometry.fcba;
@@ -912,6 +1017,8 @@ impl IntelFlashDescriptor {
 
         // 6. Resolve Profile (DEF-15, DEF-25, DEF-34, DEF-35)
         let resolution = detect_ifd_profile_resolution(flmap0, flmap1, flmap2, raw_flcomp, raw_flmstr1, profile_override);
+        #[cfg(test)]
+        crate::engine::testing::observer::record_ifd_profile_decoder();
         let profile = resolution.profile;
         let profile_confidence = resolution.confidence;
         let profile_source = resolution.source;
@@ -1032,9 +1139,15 @@ impl IntelFlashDescriptor {
                 }
             }
         }
+        #[cfg(test)]
+        crate::engine::testing::observer::record_ifd_region_table();
 
         // 10. Run boundary validation
         let (boundary_conflicts, boundary_warnings) = validate_region_boundaries(&regions, image_size);
+        #[cfg(test)]
+        if !boundary_conflicts.is_empty() {
+            crate::engine::testing::observer::record_ifd_region_conflict();
+        }
         issues.extend(boundary_warnings);
 
         let structural_passed = has_valid_sig && region_table_in_bounds && boundary_conflicts.is_empty();

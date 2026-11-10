@@ -82,8 +82,11 @@ impl DellPfsParser {
     /// Detect whether the buffer contains Dell PFS section markers.
     pub fn is_dell_pfs(data: &[u8]) -> bool {
         let reader = BinaryReader::new(data);
-        reader.find_subslice(DELL_PFS_SECTION_PATTERN, 0, None).is_some()
-            || reader.find_subslice(PFS_HDR_TAG, 0, None).is_some()
+        let res = reader.find_subslice(DELL_PFS_SECTION_PATTERN, 0, None).is_some()
+            || reader.find_subslice(PFS_HDR_TAG, 0, None).is_some();
+        #[cfg(test)]
+        crate::engine::testing::observer::record_pfs_container(res);
+        res
     }
 
     /// Extract all components from a Dell PFS package and write them to output_dir if specified.
@@ -117,6 +120,8 @@ impl DellPfsParser {
         // Also check if the buffer is directly a raw decompressed PFS volume (starts with PFS.HDR.)
         if section_offsets.is_empty() {
             if let Some(hdr_offset) = reader.find_subslice(PFS_HDR_TAG, 0, Some(0x1000)) {
+                #[cfg(test)]
+                crate::engine::testing::observer::record_pfs_container(true);
                 let raw_pfs_slice = &data[hdr_offset..];
                 Self::parse_inner_pfs(
                     raw_pfs_slice,
@@ -130,12 +135,22 @@ impl DellPfsParser {
                 return Ok(report);
             }
 
+            #[cfg(test)]
+            crate::engine::testing::observer::record_pfs_container(false);
+
             return Err(AppError::Binary(
                 "No Dell PFS section markers or PFS.HDR. volume tags found".to_string(),
             ));
         }
 
+        #[cfg(test)]
+        crate::engine::testing::observer::record_pfs_container(true);
+
         report.total_sections_found = section_offsets.len();
+        #[cfg(test)]
+        if report.total_sections_found > 0 {
+            crate::engine::testing::observer::record_pfs_section_table();
+        }
 
         for (sec_idx, &zlib_start) in section_offsets.iter().enumerate() {
             // Header starts 5 bytes before the 10-byte pattern:
@@ -160,6 +175,8 @@ impl DellPfsParser {
             let hdr_chk_calc = checksum_8_xor(&header_data[0..15]);
             let hdr_chk_stored = header_data[15];
             let header_checksum_valid = hdr_chk_calc == hdr_chk_stored;
+            #[cfg(test)]
+            crate::engine::testing::observer::record_pfs_xor(header_checksum_valid);
 
             if !header_checksum_valid {
                 report.issues.push(format!(
@@ -194,6 +211,8 @@ impl DellPfsParser {
                 let ftr_chk_calc = checksum_8_xor(&footer_data[0..15]);
                 let ftr_chk_stored = footer_data[15];
                 footer_checksum_valid = ftr_chk_calc == ftr_chk_stored;
+                #[cfg(test)]
+                crate::engine::testing::observer::record_pfs_xor(footer_checksum_valid);
             }
 
             // Pure-Rust ZLIB decompression with bounded reader
@@ -240,20 +259,30 @@ impl DellPfsParser {
 
     /// Decompress a ZLIB stream with bounded capacity to protect against zip bombs.
     fn decompress_zlib_bounded(compressed_data: &[u8]) -> Result<Vec<u8>, AppError> {
+        #[cfg(test)]
+        crate::engine::testing::observer::record_pfs_zlib_attempt();
+
         let mut decoder = ZlibDecoder::new(compressed_data);
         let mut out = Vec::new();
         let mut buffer = [0u8; 64 * 1024];
 
         loop {
-            let bytes_read = decoder.read(&mut buffer).map_err(|e| {
-                AppError::Binary(format!("Corrupt ZLIB compression stream: {}", e))
-            })?;
+            let bytes_read = match decoder.read(&mut buffer) {
+                Ok(n) => n,
+                Err(e) => {
+                    #[cfg(test)]
+                    crate::engine::testing::observer::record_pfs_zlib_result(false);
+                    return Err(AppError::Binary(format!("Corrupt ZLIB compression stream: {}", e)));
+                }
+            };
 
             if bytes_read == 0 {
                 break;
             }
 
             if out.len() + bytes_read > MAX_DECOMPRESSED_SIZE {
+                #[cfg(test)]
+                crate::engine::testing::observer::record_pfs_zlib_result(false);
                 return Err(AppError::Binary(format!(
                     "Decompressed size exceeded maximum threshold of {} MB (possible decompression bomb)",
                     MAX_DECOMPRESSED_SIZE / (1024 * 1024)
@@ -262,6 +291,9 @@ impl DellPfsParser {
 
             out.extend_from_slice(&buffer[..bytes_read]);
         }
+
+        #[cfg(test)]
+        crate::engine::testing::observer::record_pfs_zlib_result(true);
 
         Ok(out)
     }
@@ -316,6 +348,8 @@ impl DellPfsParser {
         if footer_tag == PFS_FTR_TAG && footer_size == payload_size {
             let computed_inverted_crc = inverted_crc32(payload_slice);
             crc_valid = computed_inverted_crc == footer_checksum;
+            #[cfg(test)]
+            crate::engine::testing::observer::record_pfs_crc(crc_valid);
             if !crc_valid {
                 report.issues.push(format!(
                     "Inverted CRC-32 mismatch on PFS payload: calc=0x{:08X}, footer=0x{:08X}",
@@ -500,6 +534,9 @@ impl DellPfsParser {
             let mut validation_notes = Vec::new();
             validation_notes.push(format!("Extracted from section '{}' at depth {}", section_name, depth));
             validation_notes.push(format!("Integrity verified via SHA-256: {}", sha256));
+
+            #[cfg(test)]
+            crate::engine::testing::observer::record_pfs_guid_name();
 
             report.components.push(DellPfsExtractedComponent {
                 index: report.components.len() + 1,

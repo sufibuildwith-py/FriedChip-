@@ -35,7 +35,15 @@ impl FirmwareVolume {
         // Search for "_FVH" signature occurrences
         let sig_offsets = reader.find_all(EFI_FVH_SIGNATURE, 0, None);
 
+        if sig_offsets.is_empty() {
+            #[cfg(test)]
+            crate::engine::testing::observer::record_fv_fvh(false);
+        }
+
         for sig_offset in sig_offsets {
+            #[cfg(test)]
+            crate::engine::testing::observer::record_fv_fvh(true);
+
             // Header starts 0x28 bytes before the signature
             if sig_offset < 0x28 {
                 continue;
@@ -75,19 +83,31 @@ impl FirmwareVolume {
             return Err(AppError::Binary("Invalid header length in FV header".to_string()));
         }
 
+        #[cfg(test)]
+        crate::engine::testing::observer::record_fv_header_validated();
+
         let hdr_bytes = reader.slice(offset, header_length as usize)?;
         let checksum_valid = verify_efi_fv_checksum(hdr_bytes);
 
+        #[cfg(test)]
+        crate::engine::testing::observer::record_fv_checksum_evaluated();
+
         // Parse block map entries starting at offset + 0x38
+        // Per UEFI PI Specification (Vol 3, Sec 3.2.1), the block map array MUST be terminated
+        // with an entry containing NumBlocks = 0 and BlockLength = 0 (the {0, 0} sentinel).
         let mut block_maps = Vec::new();
         let mut curr = offset + 0x38;
+        let mut sentinel_found = false;
 
         while curr + 8 <= offset + (header_length as usize) {
             let num_blocks = reader.read_u32_le(curr)?;
             let block_length = reader.read_u32_le(curr + 4)?;
 
+            #[cfg(test)]
+            crate::engine::testing::observer::record_fv_block_map_traversed();
+
             if num_blocks == 0 && block_length == 0 {
-                // End of block map array
+                sentinel_found = true;
                 break;
             }
 
@@ -97,6 +117,15 @@ impl FirmwareVolume {
             });
 
             curr += 8;
+        }
+
+        #[cfg(test)]
+        crate::engine::testing::observer::record_fv_sentinel(sentinel_found);
+
+        if !sentinel_found {
+            return Err(AppError::Binary(
+                "UEFI Firmware Volume block map missing required terminating {0, 0} sentinel".to_string(),
+            ));
         }
 
         Ok(FirmwareVolumeHeader {

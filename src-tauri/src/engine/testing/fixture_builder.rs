@@ -108,8 +108,8 @@ impl SyntheticFixtureBuilder {
         data[0x14..0x18].copy_from_slice(&flmap0.to_le_bytes());
 
         // 3. FLMAP1 at 0x18:
-        // FMBA = 0x08 (0x80), NM = 2 (3 masters), FISBA = 0x10 (0x100), ISL = 0x50
-        let flmap1: u32 = (0x50 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
+        // FMBA = 0x08 (0x80), NM = 2 (3 masters), FISBA = 0x10 (0x100), ISL = 0x20 (128 bytes, 0x100..0x180)
+        let flmap1: u32 = (0x20 << 24) | (0x10 << 16) | (0x02 << 8) | 0x08;
         data[0x18..0x1C].copy_from_slice(&flmap1.to_le_bytes());
 
         // 4. FLMAP2 at 0x1C:
